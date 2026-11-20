@@ -21,6 +21,57 @@
 > Local console streaming has not been tested because I do not have a modern
 > Xbox console available for validation.
 
+## What this fork changes
+
+Turbo GreenVita is a fork of
+[GreenVita](https://github.com/Day-OS/green-vita) at 0.1.8. Everything below is
+what this fork adds on top; the core xCloud/WebRTC client, sign-in, and UI
+remain the upstream project's work.
+
+### Streaming quality and latency
+
+Ported from [Vita Moonlight](https://github.com/xyzz/vita-moonlight), which
+streams smoothly on the same hardware:
+
+- **Low-delay H.264 decode mode.** The hardware decoder is configured for
+  minimal internal reordering, so B-frame streams no longer buffer several
+  access units before the first picture is output.
+- **4 reference frames** (up from 1), which removes the visible corruption
+  (datamoshing) during motion in high-bitrate scenes.
+- **Triple-buffered video textures.** Decoded frames write into a third
+  texture, so the decoder no longer stalls waiting for the previous frame to
+  be displayed, and a not-yet-shown frame is never overwritten.
+- **Decode-driven rendering.** The UI loop wakes as soon as a frame is
+  decoded instead of polling on a fixed timer, cutting up to one render-tick
+  of added latency per frame.
+- **More tolerant decoder admission control.** A single slow decode no longer
+  forces a frame drop and a keyframe-request storm; small backlogs are
+  absorbed instead of amplified.
+- **SDP ICE credential normalization**, fixing session-negotiation edge cases
+  with the xCloud answer.
+
+The low-delay function (`sceAvcdecSetLowDelayModeNongameapp`) is not exported
+by the `SceVideodecUser` library that VitaSDK's stub imports from; it lives in
+`SceVideodecLowDelayUser`. Calling the SDK stub jumps to a null pointer and
+crashes the stream instantly. `build.rs` therefore assembles a correct import
+stub (`vita-stubs/SceVideodecLowDelayUser.S`) at build time and links it under
+a renamed symbol — the same approach vita-moonlight uses with a custom
+`vita-libs-gen` stub.
+
+### Max bitrate setting
+
+A new **Max bitrate** row in Settings advertises a bitrate cap (2, 3, 4, 5, 6,
+8, or 10 Mbps) to xCloud in the client-capabilities message and SDP, letting
+you trade image quality for stability on weak or congested Wi-Fi. The default
+is 2 Mbps, matching upstream behavior. Settings saved with older values
+(15–50 Mbps) load as 10 Mbps.
+
+### UI
+
+- Full rebrand to **Turbo GreenVita** (`TURBOVITA` title ID): logo, LiveArea,
+  localized strings, release workflow, and package name.
+- Reworked game-profile menu and Select button mapping.
+
 ## Install
 
 You need a homebrew-enabled PS Vita with VitaShell and an Xbox account that has
@@ -33,14 +84,14 @@ access to Xbox Cloud Gaming.
 4. Launch Turbo GreenVita and complete the device-code sign-in.
 
 > [!IMPORTANT]
-> Enable **Unsafe Homebrew** in HENkaku Settings. GreenVita needs access to the
-> Vita hardware video-decoder module.
+> Enable **Unsafe Homebrew** in HENkaku Settings. Turbo GreenVita needs access
+> to the Vita hardware video-decoder module.
 
 ## Build
 
 ### 1. Install VitaSDK
 
-GreenVita follows the official [VitaSDK/VDPM setup](https://github.com/vitasdk/vdpm).
+Turbo GreenVita follows the official [VitaSDK/VDPM setup](https://github.com/vitasdk/vdpm).
 On Arch Linux, install the host tools first:
 
 ```sh
@@ -169,15 +220,18 @@ The destination directory must already exist. Install the VPK before using
   WebRTC streaming library used by Greenlight and a key reference for xCloud
   and xHome session handling
 - [Vita Moonlight](https://github.com/xyzz/vita-moonlight), a major reference
-  for low-latency streaming and hardware video decoding on the PS Vita
-- PS Vita icon used in the GreenVita logo: "PS Vita" by Mark Davis from
+  for low-latency streaming and hardware video decoding on the PS Vita; the
+  decoder and buffering improvements described in
+  [What this fork changes](#what-this-fork-changes) are ported from it
+- PS Vita icon used in the Turbo GreenVita logo: "PS Vita" by Mark Davis from
   [The Noun Project](https://thenounproject.com/icon/ps-vita-203775/)
 - [VitaSDK](https://vitasdk.org/) and the
   [vita-rust](https://github.com/vita-rust) ecosystem
 
-GreenVita is an independent homebrew project and is not affiliated with or
-endorsed by Microsoft, Xbox, Sony, or PlayStation.
+Turbo GreenVita is an independent homebrew project and is not affiliated with
+or endorsed by Microsoft, Xbox, Sony, or PlayStation.
 
 ## License
 
-GreenVita is licensed under the [Mozilla Public License 2.0](LICENSE).
+Turbo GreenVita is licensed under the [Mozilla Public License 2.0](LICENSE).
+The upstream GreenVita license and copyright notices are preserved.
