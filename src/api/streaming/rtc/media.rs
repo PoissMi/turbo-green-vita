@@ -31,6 +31,7 @@ pub(crate) struct VideoReceiver {
     last_stats_report: Instant,
     bytes_since_report: u64,
     stats: VideoStats,
+    direct_output: Arc<DirectVideoOutput>,
 }
 
 impl VideoReceiver {
@@ -43,13 +44,14 @@ impl VideoReceiver {
             receiver_id: None,
             ssrc: None,
             rtp: rtp::VideoRtp::new(config.decode_width, config.decode_height),
-            decoder: VideoDecodeWorker::spawn(config, direct_output)?,
+            decoder: VideoDecodeWorker::spawn(config, Arc::clone(&direct_output))?,
             latest_frame: None,
             next_frame_id: 0,
             received_packet: false,
             last_stats_report: Instant::now(),
             bytes_since_report: 0,
             stats: VideoStats::default(),
+            direct_output,
         })
     }
 
@@ -164,8 +166,13 @@ impl VideoReceiver {
             .encoded_resolution
             .map(|(width, height)| format!("{width}x{height}"))
             .unwrap_or_else(|| "?".to_owned());
+        let memory = if self.direct_output.decoder_uses_phycont.load(std::sync::atomic::Ordering::Relaxed) {
+            "PHYCONT-NC"
+        } else {
+            "CDRAM"
+        };
         Some(format!(
-            "net:{bitrate_kbps}kbps enc:{encoded_resolution} srcfps:{source_fps} {performance} wait:{} drop:{} err:{}",
+            "mem:{memory} out:NV12 net:{bitrate_kbps}kbps enc:{encoded_resolution} srcfps:{source_fps} {performance} wait:{} drop:{} err:{}",
             u8::from(self.rtp.waiting_for_keyframe()),
             self.stats.dropped,
             self.stats.decode_errors,

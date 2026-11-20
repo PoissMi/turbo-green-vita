@@ -9,6 +9,8 @@ fn main() {
         return;
     }
 
+    println!("cargo:rustc-link-arg=-Wl,--wrap=sceGxmEndScene");
+
     // sceAvcdecSetLowDelayModeNongameapp lives in SceVideodecLowDelayUser (NID 0x6354EEFF),
     // not the SceVideodecUser library the SDK stub imports from. Assemble a correct import
     // stub (as/ar only; the SDK's C compiler is broken on this host).

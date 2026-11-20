@@ -5,161 +5,113 @@ mod worker;
 
 pub const STREAM_WIDTH: u32 = 1280;
 pub const STREAM_HEIGHT: u32 = 720;
-pub const HW_OUTPUT_WIDTH: u32 = 960;
-pub const HW_OUTPUT_HEIGHT: u32 = 544;
-
-pub use memory::reserve_decoder_cdram;
 pub use metrics::video_performance_summary;
 pub use worker::VideoDecodeWorker;
 
-use std::sync::atomic::AtomicBool;
-use std::sync::{Condvar, Mutex, MutexGuard};
-use std::time::Duration;
-
-// With three textures a free slot normally exists (displayed and pending are always distinct),
-// so this wait only fires if that invariant is ever broken; it caps how long decode can stall.
-const MAX_PENDING_TEXTURE_WAIT: Duration = Duration::from_millis(67);
+use anyhow::{Result, ensure};
+use memory::DecoderBlock;
+use std::sync::{Mutex, atomic::AtomicBool};
 
 #[derive(Clone, Copy)]
-pub(crate) struct VideoTextureTarget {
-    pub(crate) ptr: usize,
-    pub(crate) pitch: u32,
-    pub(crate) capacity: u32,
+pub(crate) struct YuvLayout {
+    pub width: u32,
+    pub height: u32,
+    pub uv_offset: u32,
+    pub bytes: u32,
 }
 
-struct DirectVideoOutputState {
-    targets: Option<[VideoTextureTarget; 3]>,
-    displayed: Option<usize>,
-    // SDL present is async, so the previously displayed texture may still be scanned out;
-    // keep it out of rotation until one more frame has been picked up.
-    prev_displayed: Option<usize>,
-    pending: Option<(usize, u64)>,
-    next_generation: u64,
+impl YuvLayout {
+    fn new(width: u32, height: u32) -> Result<Self> {
+        ensure!(width > 0 && height > 0 && width <= STREAM_WIDTH && height <= STREAM_HEIGHT);
+        let width = width.next_multiple_of(16);
+        let height = height.next_multiple_of(16);
+        let uv_offset = width * height;
+        Ok(Self { width, height, uv_offset, bytes: uv_offset + uv_offset / 2 })
+    }
 }
 
-/// Synchronizes the decoder thread with the three SDL/GXM textures owned by the render thread.
-/// Pointers are stored as integers so the platform-specific unsafe boundary stays in the code
-/// that registers and consumes the textures.
+static IDLE_OUTPUT_SLOTS: Mutex<Option<[DecoderBlock; 3]>> = Mutex::new(None);
+
+pub(crate) fn reserve_yuv_output() -> Result<()> {
+    let layout = YuvLayout::new(STREAM_WIDTH, STREAM_HEIGHT)?;
+    *IDLE_OUTPUT_SLOTS.lock().unwrap() = Some([
+        DecoderBlock::allocate(layout.bytes, false)?,
+        DecoderBlock::allocate(layout.bytes, false)?,
+        DecoderBlock::allocate(layout.bytes, false)?,
+    ]);
+    Ok(())
+}
+
 pub(crate) struct DirectVideoOutput {
-    state: Mutex<DirectVideoOutputState>,
-    frame_displayed: Condvar,
-    pub(crate) decoder_ready: AtomicBool,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
+    slots: Mutex<Option<[DecoderBlock; 3]>>,
+    state: Mutex<SlotState>,
+    pub(crate) decoder_uses_phycont: AtomicBool,
+}
+
+#[derive(Default)]
+struct SlotState {
+    next: u64,
+    generations: [Option<u64>; 3],
 }
 
 impl DirectVideoOutput {
-    pub(crate) fn new(width: u32, height: u32) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            state: Mutex::new(DirectVideoOutputState {
-                targets: None,
-                displayed: None,
-                prev_displayed: None,
-                pending: None,
-                next_generation: 0,
-            }),
-            frame_displayed: Condvar::new(),
-            decoder_ready: AtomicBool::new(false),
-            width,
-            height,
+            slots: Mutex::new(None),
+            state: Mutex::new(SlotState::default()),
+            decoder_uses_phycont: AtomicBool::new(false),
         }
     }
 
-    pub(crate) fn set_targets(&self, targets: [VideoTextureTarget; 3]) {
-        if let Ok(mut state) = self.state.lock() {
-            state.targets = Some(targets);
-            state.displayed = None;
-            state.prev_displayed = None;
-            state.pending = None;
-        }
+    fn acquire_slots(&self, layout: YuvLayout) -> Result<()> {
+        ensure!(layout.bytes <= YuvLayout::new(STREAM_WIDTH, STREAM_HEIGHT)?.bytes);
+        let slots = IDLE_OUTPUT_SLOTS.lock().unwrap().take()
+            .ok_or_else(|| anyhow::anyhow!("NV12 output buffers are still in use by the previous stream"))?;
+        *self.slots.lock().unwrap() = Some(slots);
+        Ok(())
     }
 
-    pub(crate) fn clear_targets(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.targets = None;
-            state.displayed = None;
-            state.prev_displayed = None;
-            state.pending = None;
-        }
-        self.frame_displayed.notify_all();
+    fn reserve(&self) -> (usize, u64, *mut u8) {
+        let mut state = self.state.lock().unwrap();
+        let generation = state.next;
+        let index = (generation % 3) as usize;
+        state.next = generation.wrapping_add(1);
+        state.generations[index] = None;
+        let address = self.slots.lock().unwrap().as_ref().unwrap()[index].address;
+        (index, generation, address as *mut u8)
     }
 
-    pub(crate) fn mark_displayed(&self, index: usize, generation: u64) {
-        let mut cleared_pending = false;
-        if let Ok(mut state) = self.state.lock() {
-            if state.displayed != Some(index) {
-                state.prev_displayed = state.displayed;
-            }
-            state.displayed = Some(index);
-            if state.pending == Some((index, generation)) {
-                state.pending = None;
-                cleared_pending = true;
-            }
-        }
-        if cleared_pending {
-            self.frame_displayed.notify_one();
-        }
+    fn publish(&self, index: usize, generation: u64) {
+        self.state.lock().unwrap().generations[index] = Some(generation);
     }
 
-    pub(super) fn lock_decode_target(&self) -> Option<DirectVideoTargetGuard<'_>> {
-        let mut state = self.state.lock().ok()?;
-        if state.targets.is_some() && Self::free_slot(&state).is_none() {
-            let (waited_state, _) = self
-                .frame_displayed
-                .wait_timeout_while(state, MAX_PENDING_TEXTURE_WAIT, |state| {
-                    state.targets.is_some() && Self::free_slot(state).is_none()
-                })
-                .ok()?;
-            state = waited_state;
+    pub(crate) fn with_frame<T>(&self, frame: &DecodedFrame, upload: impl FnOnce(*const u8) -> T) -> Option<T> {
+        let state = self.state.lock().unwrap();
+        if state.generations[frame.index] != Some(frame.generation) {
+            return None;
         }
-        let targets = state.targets?;
-        // Never touch the texture being scanned out; if every slot is busy past the wait,
-        // overwrite the pending (unshown) frame rather than stalling the decoder.
-        let index = Self::free_slot(&state)
-            .or(state.pending.map(|(index, _)| index))
-            .unwrap_or(0);
-        Some(DirectVideoTargetGuard {
-            state,
-            target: targets[index],
-            index,
-        })
-    }
-
-    fn free_slot(state: &DirectVideoOutputState) -> Option<usize> {
-        let targets = state.targets.as_ref()?;
-        let pending_index = state.pending.map(|(index, _)| index);
-        (0..targets.len()).find(|&index| {
-            state.displayed != Some(index)
-                && state.prev_displayed != Some(index)
-                && pending_index != Some(index)
-        })
+        let slots = self.slots.lock().unwrap();
+        Some(upload(slots.as_ref().unwrap()[frame.index].address as *const u8))
     }
 }
 
-pub(super) struct DirectVideoTargetGuard<'a> {
-    state: MutexGuard<'a, DirectVideoOutputState>,
-    target: VideoTextureTarget,
-    index: usize,
-}
-
-impl DirectVideoTargetGuard<'_> {
-    pub(super) fn publish(mut self) -> (usize, u64) {
-        self.state.next_generation = self.state.next_generation.wrapping_add(1);
-        let generation = self.state.next_generation;
-        self.state.pending = Some((self.index, generation));
-        (self.index, generation)
+impl Drop for DirectVideoOutput {
+    fn drop(&mut self) {
+        if let Some(slots) = self.slots.get_mut().unwrap().take() {
+            *IDLE_OUTPUT_SLOTS.lock().unwrap() = Some(slots);
+        }
     }
 }
 
 pub struct DecodedFrame {
-    pub texture_index: usize,
-    pub generation: u64,
+    index: usize,
+    generation: u64,
+    pub(crate) layout: YuvLayout,
+    pub(crate) visible: [u32; 4],
 }
 
 #[derive(Clone, Copy)]
 pub struct DecoderConfig {
     pub decode_width: u32,
     pub decode_height: u32,
-    pub output_width: u32,
-    pub output_height: u32,
 }

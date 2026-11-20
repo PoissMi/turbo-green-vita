@@ -1,6 +1,6 @@
 //! PS Vita hardware H.264 decoder (`sceVideodec`/`sceAvcdec`).
-use super::memory::{CdramBlock, release_reserved_decoder_cdram};
-use super::{DecoderConfig, VideoTextureTarget};
+use super::memory::DecoderFrameBuffer;
+use super::{DecoderConfig, YuvLayout};
 use anyhow::{Result, bail};
 use std::os::raw::c_void;
 use vitasdk_sys::*;
@@ -19,11 +19,6 @@ const SCE_AVCDEC_DELAY_MODE_LOW: i32 = 0;
 // Matches vita-moonlight's decoder config: streams using B-frames need more than one
 // reference picture, and a single reference produces visible corruption during motion.
 const AVCDEC_NUM_REF_FRAMES: u32 = 4;
-// AVCDEC and SDL's Vita GXM renderer both support RGB565 natively. At 960x544 this halves the
-// decoder-to-texture traffic from roughly 2 MiB to 1 MiB per frame, which matters at 60 FPS.
-const OUTPUT_BYTES_PER_PIXEL: u32 = 2;
-const OUTPUT_PIXEL_FORMAT: u32 = SCE_AVCDEC_PIXELFORMAT_RGBA565 as u32;
-
 struct AvcdecLibrary {
     module_loaded: bool,
 }
@@ -99,13 +94,16 @@ impl Drop for AvcdecDecoder {
 
 pub struct HwVideoDecoder {
     decoder: AvcdecDecoder,
-    _frame_memory: CdramBlock,
     _library: AvcdecLibrary,
-    width: u32,
-    height: u32,
+    _frame_memory: DecoderFrameBuffer,
+    pub(super) layout: YuvLayout,
 }
 
 impl HwVideoDecoder {
+    pub(super) fn uses_phycont(&self) -> bool {
+        self._frame_memory.is_phycont()
+    }
+
     pub fn new(config: DecoderConfig) -> Result<Self> {
         unsafe {
             let library = AvcdecLibrary::initialize(config.decode_width, config.decode_height)?;
@@ -124,13 +122,11 @@ impl HwVideoDecoder {
             if ret < 0 {
                 bail!("sceAvcdecQueryDecoderMemSize failed: {ret:#x}");
             }
-            release_reserved_decoder_cdram();
-            let frame_memory =
-                CdramBlock::allocate("xcloud_hw_video_frame", decoder_info.frameMemSize)?;
+            let frame_memory = DecoderFrameBuffer::acquire(decoder_info.frameMemSize)?;
             let mut decoder_control = SceAvcdecCtrl {
                 handle: 0,
                 frameBuf: SceAvcdecBuf {
-                    pBuf: frame_memory.ptr.cast(),
+                    pBuf: frame_memory.as_ptr(),
                     size: decoder_info.frameMemSize,
                 },
             };
@@ -143,10 +139,9 @@ impl HwVideoDecoder {
 
             Ok(Self {
                 decoder,
-                _frame_memory: frame_memory,
                 _library: library,
-                width: config.output_width,
-                height: config.output_height,
+                _frame_memory: frame_memory,
+                layout: YuvLayout::new(config.decode_width, config.decode_height)?,
             })
         }
     }
@@ -155,8 +150,8 @@ impl HwVideoDecoder {
     pub fn decode(
         &mut self,
         access_unit: &[u8],
-        direct_target: VideoTextureTarget,
-    ) -> Result<bool> {
+        output_ptr: *mut u8,
+    ) -> Result<Option<[u32; 4]>> {
         unsafe {
             let au = SceAvcdecAu {
                 pts: SceVideodecTimeStamp {
@@ -173,37 +168,23 @@ impl HwVideoDecoder {
                 },
             };
 
-            let output_ptr = direct_target.ptr as *mut u8;
-            let output_pitch = direct_target.pitch / OUTPUT_BYTES_PER_PIXEL;
-            let output_capacity = direct_target.capacity;
-            if output_pitch < self.width {
-                bail!(
-                    "direct video texture pitch {output_pitch} is smaller than {}",
-                    self.width
-                );
-            }
-
+            let layout = self.layout;
+            let uv = output_ptr.add(layout.uv_offset as usize);
             let mut picture = SceAvcdecPicture {
                 size: size_of::<SceAvcdecPicture>() as u32,
                 frame: SceAvcdecFrame {
-                    pixelType: OUTPUT_PIXEL_FORMAT,
-                    framePitch: output_pitch,
-                    frameWidth: self.width,
-                    frameHeight: self.height,
-                    horizontalSize: self.width,
-                    verticalSize: self.height,
+                    pixelType: SCE_AVCDEC_PIXELFORMAT_YUV420_PACKED_RASTER as u32,
+                    framePitch: layout.width,
+                    frameWidth: layout.width,
+                    frameHeight: layout.height,
+                    horizontalSize: layout.width,
+                    verticalSize: layout.height,
                     frameCropLeftOffset: 0,
                     frameCropRightOffset: 0,
                     frameCropTopOffset: 0,
                     frameCropBottomOffset: 0,
-                    opt: SceAvcdecFrameOption {
-                        rgba: SceAvcdecFrameOptionRGBA {
-                            alpha: 0xff,
-                            cscCoefficient: 0,
-                            reserved: [0; 14],
-                        },
-                    },
-                    pPicture: [output_ptr.cast(), std::ptr::null_mut()],
+                    opt: SceAvcdecFrameOption { reserved: [0; 16] },
+                    pPicture: [output_ptr.cast(), uv.cast()],
                 },
                 info: std::mem::zeroed(),
             };
@@ -219,28 +200,15 @@ impl HwVideoDecoder {
                 bail!("sceAvcdecDecode failed: {ret:#x}");
             }
             if array_picture.numOfOutput == 0 {
-                return Ok(false);
+                return Ok(None);
             }
-
-            // `framePitch` is in pixels. Validate the complete byte size before trusting the
-            // decoder-provided pitch to write into the SDL texture.
-            let row_bytes = picture
-                .frame
-                .framePitch
-                .checked_mul(OUTPUT_BYTES_PER_PIXEL)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("video frame pitch overflow: {}", picture.frame.framePitch)
-                })?;
-            let output_len = row_bytes.checked_mul(self.height).ok_or_else(|| {
-                anyhow::anyhow!("video output size overflow: {row_bytes} * {}", self.height)
-            })?;
-            if output_len > output_capacity {
-                bail!(
-                    "sceAvcdecDecode produced pitch requiring {output_len} bytes, but output buffer has {} bytes",
-                    output_capacity
-                );
-            }
-            Ok(true)
+            let frame = picture.frame;
+            anyhow::ensure!(frame.framePitch == layout.width && frame.pPicture == [output_ptr.cast(), uv.cast()], "unexpected AVCDEC YUV layout");
+            let (x, y) = (frame.frameCropLeftOffset, frame.frameCropTopOffset);
+            let w = frame.horizontalSize.min(layout.width).saturating_sub(x.saturating_add(frame.frameCropRightOffset));
+            let h = frame.verticalSize.min(layout.height).saturating_sub(y.saturating_add(frame.frameCropBottomOffset));
+            anyhow::ensure!(w > 0 && h > 0, "invalid AVCDEC picture crop");
+            Ok(Some([x, y, w, h]))
         }
     }
 }

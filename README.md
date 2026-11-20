@@ -31,7 +31,10 @@ remain the upstream project's work.
 ### Streaming quality and latency
 
 Ported from [Vita Moonlight](https://github.com/xyzz/vita-moonlight), which
-streams smoothly on the same hardware:
+streams smoothly on the same hardware. The first release of this fork (0.1.8)
+shipped the latency work; the changes after it target decoder throughput.
+
+**Latency and stability (0.1.8):**
 
 - **Low-delay H.264 decode mode.** The hardware decoder is configured for
   minimal internal reordering, so B-frame streams no longer buffer several
@@ -48,7 +51,8 @@ streams smoothly on the same hardware:
   forces a frame drop and a keyframe-request storm; small backlogs are
   absorbed instead of amplified.
 - **SDP ICE credential normalization**, fixing session-negotiation edge cases
-  with the xCloud answer.
+  with the xCloud answer. The max-bitrate setting below also advertises its
+  value in the client-capabilities message and SDP.
 
 The low-delay function (`sceAvcdecSetLowDelayModeNongameapp`) is not exported
 by the `SceVideodecUser` library that VitaSDK's stub imports from; it lives in
@@ -57,6 +61,34 @@ crashes the stream instantly. `build.rs` therefore assembles a correct import
 stub (`vita-stubs/SceVideodecLowDelayUser.S`) at build time and links it under
 a renamed symbol — the same approach vita-moonlight uses with a custom
 `vita-libs-gen` stub.
+
+**Throughput (after 0.2.0):**
+
+On-device testing confirms that these changes deliver a **clear performance
+improvement** over RGB565 hardware downscaling; PHYCONT-NC alone contributed
+only a small gain, while moving conversion and scaling to the GPU produced
+the larger improvement.
+
+- **PHYCONT-NC decoder memory.** The hardware decoder's internal frame buffer
+  is now allocated in physically-contiguous, non-cached main memory (falling
+  back to CDRAM if PHYCONT is unavailable). The buffer is cached and reused
+  across sessions, which also avoids the CDRAM fragmentation that the old
+  reserve-then-reallocate scheme worked around. The stream debug HUD shows
+  the active pool as `mem:PHYCONT-NC` or `mem:CDRAM`.
+- **Full-resolution YUV with GPU color conversion.** AVCDEC decodes
+  `SCE_AVCDEC_PIXELFORMAT_YUV420_PACKED_RASTER` at 1280×720; the Vita GXM
+  renderer converts and scales it on the GPU (NV12 → `YVU420P2_CSC0`,
+  matching Vita Moonlight). The decoder no longer performs RGB conversion
+  plus a 720p→544p downscale per frame. `out:NV12` in the HUD confirms the
+  path; upload and GPU-wait times are drawn to compare against the previous
+  path.
+- **Memory management for output.** NV12 staging buffers are reserved before
+  SDL starts, because SDL consumes the available CDRAM on the tested Vita.
+  Slots are lent to each stream session and returned by the final owner, so
+  repeated starts do not reallocate backing memory.
+- **GPU-aware texture reuse.** The renderer records the GXM context used by
+  SDL and waits for its scene to finish before the next upload or before
+  destroying the displayed texture.
 
 ### Max bitrate setting
 

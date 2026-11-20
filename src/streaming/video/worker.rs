@@ -38,7 +38,8 @@ impl VideoDecodeWorker {
     pub fn spawn(config: DecoderConfig, direct_output: Arc<DirectVideoOutput>) -> Result<Self> {
         let decoder =
             HwVideoDecoder::new(config).context("failed to create hardware H264 decoder")?;
-        direct_output.decoder_ready.store(true, Ordering::Release);
+        direct_output.decoder_uses_phycont.store(decoder.uses_phycont(), Ordering::Relaxed);
+        direct_output.acquire_slots(decoder.layout)?;
         let (access_units, worker_access_units) = bounded(MAX_PENDING_ACCESS_UNITS);
         let (commands, worker_commands) = unbounded();
         let generation = Arc::new(AtomicU64::new(0));
@@ -192,7 +193,10 @@ fn decode_queued_access_unit(
 
     if decoder.is_none() {
         match HwVideoDecoder::new(config) {
-            Ok(new_decoder) => *decoder = Some(new_decoder),
+            Ok(new_decoder) => {
+                direct_output.decoder_uses_phycont.store(new_decoder.uses_phycont(), Ordering::Relaxed);
+                *decoder = Some(new_decoder);
+            }
             Err(error) => {
                 publish_result(
                     latest_result,
@@ -204,19 +208,14 @@ fn decode_queued_access_unit(
         }
     }
 
-    let Some(direct_target) = direct_output.lock_decode_target() else {
-        // Do not decode until the renderer has registered its GXM textures. There is no
-        // legacy output buffer to copy from anymore.
-        metrics::METRICS.skipped.fetch_add(1, Ordering::Relaxed);
-        return;
-    };
-    // Measure the hardware call and contain an unexpected decoder panic inside its worker.
+    let (index, slot_generation, target) = direct_output.reserve();
+    let layout = decoder.as_ref().unwrap().layout;
     let decode_started_at = Instant::now();
     let decode_result = catch_unwind(AssertUnwindSafe(|| {
         decoder
             .as_mut()
             .expect("decoder recreated above")
-            .decode(&access_unit.data, direct_target.target)
+            .decode(&access_unit.data, target)
     }));
     metrics::METRICS.decode_us.store(
         decode_started_at.elapsed().as_micros() as u64,
@@ -227,9 +226,9 @@ fn decode_queued_access_unit(
     }
 
     match decode_result {
-        Ok(Ok(true)) => {
+        Ok(Ok(Some(visible))) => {
             metrics::METRICS.decoded.fetch_add(1, Ordering::Relaxed);
-            let (texture_index, generation) = direct_target.publish();
+            direct_output.publish(index, slot_generation);
             metrics::METRICS.pipeline_age_us.store(
                 access_unit.queued_at.elapsed().as_micros() as u64,
                 Ordering::Relaxed,
@@ -238,12 +237,14 @@ fn decode_queued_access_unit(
                 latest_result,
                 result_ready,
                 Ok(DecodedFrame {
-                    texture_index,
-                    generation,
+                    index,
+                    generation: slot_generation,
+                    layout,
+                    visible,
                 }),
             );
         }
-        Ok(Ok(false)) => {}
+        Ok(Ok(None)) => {}
         Ok(Err(error)) => {
             *decoder = None;
             publish_result(latest_result, result_ready, Err(error.to_string()));

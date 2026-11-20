@@ -1,52 +1,101 @@
 use anyhow::{Result, bail};
-use std::ffi::CString;
-use std::os::raw::c_void;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::ffi::c_void;
+use std::sync::Mutex;
 use vitasdk_sys::*;
 
-const BLOCK_ALIGNMENT: u32 = 256 * 1024;
-const RESERVE_SIZES: [u32; 4] = [
-    48 * 1024 * 1024,
-    24 * 1024 * 1024,
-    16 * 1024 * 1024,
-    8 * 1024 * 1024,
-];
+const PHYCONT_GRANULARITY: u32 = 1024 * 1024;
+const CDRAM_ALIGNMENT: u32 = 256 * 1024;
 
-static RESERVED_CDRAM: AtomicI32 = AtomicI32::new(0);
+static IDLE_BUFFER: Mutex<Option<DecoderBlock>> = Mutex::new(None);
 
-pub fn reserve_decoder_cdram() {
-    if RESERVED_CDRAM.load(Ordering::Relaxed) > 0 {
-        return;
-    }
+pub(super) struct DecoderBlock {
+    uid: SceUID,
+    pub(super) address: usize,
+    capacity: u32,
+    phycont: bool,
+}
 
-    for size in RESERVE_SIZES {
-        let name = CString::new("xcloud_avcdec_reserve").expect("static name has no interior NUL");
-        let uid = unsafe {
-            sceKernelAllocMemBlock(
-                name.as_ptr(),
-                SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW,
-                size,
-                std::ptr::null_mut(),
-            )
-        };
-        if uid >= 0 {
-            RESERVED_CDRAM.store(uid, Ordering::Relaxed);
-            eprintln!("Reserved {size} bytes of CDRAM for AVCDEC");
-            return;
-        }
-        eprintln!(
-            "Failed to reserve {size} bytes of CDRAM for AVCDEC: {uid:#x}; {}",
-            free_memory_summary(),
-        );
+impl Drop for DecoderBlock {
+    fn drop(&mut self) {
+        unsafe { sceKernelFreeMemBlock(self.uid) };
     }
 }
 
-pub(super) fn release_reserved_decoder_cdram() {
-    let uid = RESERVED_CDRAM.swap(0, Ordering::Relaxed);
-    if uid > 0 {
-        unsafe {
-            sceKernelFreeMemBlock(uid);
+pub(super) struct DecoderFrameBuffer(Option<DecoderBlock>);
+
+impl DecoderFrameBuffer {
+    pub(super) fn acquire(size: u32) -> Result<Self> {
+        let mut idle = IDLE_BUFFER.lock().unwrap();
+        if idle.as_ref().is_some_and(|block| block.capacity >= size) {
+            return Ok(Self(idle.take()));
         }
+        drop(idle.take());
+        drop(idle);
+
+        match DecoderBlock::allocate(size, true) {
+            Ok(block) => Ok(Self(Some(block))),
+            Err(error) => {
+                eprintln!("PHYCONT-NC unavailable; trying CDRAM: {error:#}");
+                DecoderBlock::allocate(size, false).map(|block| Self(Some(block)))
+            }
+        }
+    }
+
+    pub(super) fn is_phycont(&self) -> bool {
+        self.0.as_ref().unwrap().phycont
+    }
+
+    pub(super) fn as_ptr(&self) -> *mut c_void {
+        self.0.as_ref().unwrap().address as *mut c_void
+    }
+}
+
+impl Drop for DecoderFrameBuffer {
+    fn drop(&mut self) {
+        let block = self.0.take().unwrap();
+        let mut idle = IDLE_BUFFER.lock().unwrap();
+        if idle.as_ref().is_none_or(|cached| {
+            (block.phycont, block.capacity) > (cached.phycont, cached.capacity)
+        }) {
+            *idle = Some(block);
+        }
+    }
+}
+
+impl DecoderBlock {
+    pub(super) fn allocate(size: u32, phycont: bool) -> Result<Self> {
+        let (mem_type, alignment, pool) = if phycont {
+            (SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW, PHYCONT_GRANULARITY, "PHYCONT-NC")
+        } else {
+            (SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, CDRAM_ALIGNMENT, "CDRAM")
+        };
+        let capacity = size.div_ceil(alignment) * alignment;
+        let mut options = SceKernelAllocMemBlockOpt {
+            size: size_of::<SceKernelAllocMemBlockOpt>() as u32,
+            attr: SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_ALIGNMENT,
+            alignment,
+            uidBaseBlock: 0,
+            strBaseBlockName: std::ptr::null(),
+            flags: 0,
+            reserved: [0; 10],
+        };
+        let options = if phycont { std::ptr::null_mut() } else { &mut options };
+        let uid = unsafe {
+            sceKernelAllocMemBlock(c"xcloud_avcdec_frame".as_ptr(), mem_type, capacity, options)
+        };
+        if uid < 0 {
+            bail!("{pool} decoder buffer allocation failed ({capacity} bytes): {uid:#x}; {}", free_memory_summary());
+        }
+
+        let mut block = Self { uid, address: 0, capacity, phycont };
+        let mut base = std::ptr::null_mut();
+        let ret = unsafe { sceKernelGetMemBlockBase(uid, &mut base) };
+        if ret < 0 || base.is_null() {
+            bail!("sceKernelGetMemBlockBase for {pool} decoder buffer failed: {ret:#x}");
+        }
+        block.address = base as usize;
+        eprintln!("Allocated {capacity} byte decoder frame buffer in {pool}");
+        Ok(block)
     }
 }
 
@@ -66,62 +115,5 @@ fn free_memory_summary() -> String {
             "free_memory=user:{} cdram:{} phycont:{}",
             info.size_user, info.size_cdram, info.size_phycont
         )
-    }
-}
-
-pub(super) struct CdramBlock {
-    uid: SceUID,
-    pub(super) ptr: *mut u8,
-}
-
-impl CdramBlock {
-    pub(super) fn allocate(name: &str, size: u32) -> Result<Self> {
-        let c_name = CString::new(name).expect("static name has no interior NUL");
-        let capacity = size.div_ceil(BLOCK_ALIGNMENT) * BLOCK_ALIGNMENT;
-        let mut options = SceKernelAllocMemBlockOpt {
-            size: size_of::<SceKernelAllocMemBlockOpt>() as u32,
-            attr: SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_ALIGNMENT,
-            alignment: BLOCK_ALIGNMENT,
-            uidBaseBlock: 0,
-            strBaseBlockName: std::ptr::null(),
-            flags: 0,
-            reserved: [0; 10],
-        };
-        let uid = unsafe {
-            sceKernelAllocMemBlock(
-                c_name.as_ptr(),
-                SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW,
-                capacity,
-                &mut options,
-            )
-        };
-        if uid < 0 {
-            bail!(
-                "sceKernelAllocMemBlock({name:?}) failed for {size} bytes rounded to {capacity} bytes: {uid:#x}; {}",
-                free_memory_summary(),
-            );
-        }
-
-        let mut base: *mut c_void = std::ptr::null_mut();
-        let ret = unsafe { sceKernelGetMemBlockBase(uid, &mut base) };
-        if ret < 0 {
-            unsafe {
-                sceKernelFreeMemBlock(uid);
-            }
-            bail!("sceKernelGetMemBlockBase({name:?}) failed: {ret:#x}");
-        }
-
-        Ok(Self {
-            uid,
-            ptr: base.cast(),
-        })
-    }
-}
-
-impl Drop for CdramBlock {
-    fn drop(&mut self) {
-        unsafe {
-            sceKernelFreeMemBlock(self.uid);
-        }
     }
 }

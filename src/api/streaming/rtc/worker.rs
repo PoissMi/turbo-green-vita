@@ -1,6 +1,6 @@
 use crate::api::streaming::rtc::session::{RtcSession, RtcSessionConfig};
 use crate::streaming::input::{GamepadFrame, PointerEvent};
-use crate::streaming::video::{DecodedFrame, DirectVideoOutput, HW_OUTPUT_HEIGHT, HW_OUTPUT_WIDTH};
+use crate::streaming::video::{DecodedFrame, DirectVideoOutput};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use rtc::peer_connection::RTCPeerConnection;
@@ -73,7 +73,7 @@ impl RtcWorker {
         let gamepad_pulses = Arc::new(Mutex::new(VecDeque::new()));
         let worker_gamepad_pulses = Arc::clone(&gamepad_pulses);
         let direct_video_output =
-            Arc::new(DirectVideoOutput::new(HW_OUTPUT_WIDTH, HW_OUTPUT_HEIGHT));
+            Arc::new(DirectVideoOutput::new());
         let worker_direct_video_output = Arc::clone(&direct_video_output);
 
         std::thread::Builder::new()

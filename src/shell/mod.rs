@@ -31,8 +31,8 @@ const STREAM_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(4);
 pub(crate) const TARGET_FRAME_TIME: Duration = Duration::from_millis(16);
 
 pub async fn run(mut app: App) -> Result<()> {
-    crate::streaming::video::reserve_decoder_cdram();
-
+    crate::streaming::video::reserve_yuv_output()
+        .context("failed to reserve NV12 output buffers before SDL startup")?;
     let sdl = sdl2::init().map_err(anyhow::Error::msg)?;
     let video = sdl.video().map_err(anyhow::Error::msg)?;
     let audio = sdl.audio().map_err(anyhow::Error::msg)?;

@@ -1,20 +1,46 @@
 use crate::app::StreamingSession;
 use crate::shell::egui_painter::SdlEguiPainter;
-use crate::streaming::video::{DirectVideoOutput, VideoTextureTarget};
+use crate::streaming::video::{DirectVideoOutput};
 use anyhow::{Context, Result};
 use sdl2::pixels::PixelFormatEnum;
 use sdl2::render::{Canvas, Texture};
 use sdl2::video::Window;
+use std::cell::Cell;
 use std::sync::Arc;
+use std::time::Instant;
+use vitasdk_sys::{SceGxmContext, SceGxmNotification};
 use std::sync::atomic::Ordering;
 
 pub const WIDTH: u32 = 960;
 pub const HEIGHT: u32 = 544;
 
+thread_local! {
+    static SCENE_CAPTURE: Cell<Option<*mut SceGxmContext>> = const { Cell::new(None) };
+}
+
+unsafe extern "C" {
+    fn sceGxmFinish(context: *mut SceGxmContext);
+    fn __real_sceGxmEndScene(context: *mut SceGxmContext, vertex: *const SceGxmNotification, fragment: *const SceGxmNotification) -> i32;
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __wrap_sceGxmEndScene(context: *mut SceGxmContext, vertex: *const SceGxmNotification, fragment: *const SceGxmNotification) -> i32 {
+    let result = unsafe { __real_sceGxmEndScene(context, vertex, fragment) };
+    if result >= 0 {
+        SCENE_CAPTURE.with(|capture| {
+            if capture.get().is_some() {
+                capture.set(Some(context));
+            }
+        });
+    }
+    result
+}
+
 pub struct VitaSurface {
     pub(crate) canvas: Canvas<Window>,
-    video_textures: Option<[Texture; 3]>,
-    displayed_video_texture: Option<usize>,
+    video_texture: Option<Texture>,
+    source: Option<sdl2::rect::Rect>,
+    scene: Option<*mut SceGxmContext>,
     direct_video_output: Option<Arc<DirectVideoOutput>>,
     video_width: u32,
     video_height: u32,
@@ -42,8 +68,9 @@ impl VitaSurface {
 
         Ok(Self {
             canvas,
-            video_textures: None,
-            displayed_video_texture: None,
+            video_texture: None,
+            source: None,
+            scene: None,
             direct_video_output: None,
             video_width: 0,
             video_height: 0,
@@ -59,109 +86,75 @@ impl VitaSurface {
 
     pub fn sync_video_frame(&mut self, streaming: Option<&StreamingSession>) -> Result<()> {
         let Some(streaming) = streaming else {
-            self.detach_direct_video_output();
+            self.detach_video();
             return Ok(());
         };
-        self.ensure_direct_video_output(streaming)?;
-
-        let Some((frame_id, frame)) = streaming.video_frame() else {
-            return Ok(());
-        };
-        if frame_id == self.last_frame_id {
-            return Ok(());
-        }
-        let index = frame.texture_index;
-        if index >= 3 {
-            anyhow::bail!("decoder returned invalid direct texture index {index}");
-        }
-        if let Some(output) = &self.direct_video_output {
-            output.mark_displayed(index, frame.generation);
-        }
-        self.displayed_video_texture = Some(index);
-        crate::streaming::video::metrics::METRICS
-            .presented
-            .fetch_add(1, Ordering::Relaxed);
-        self.last_frame_id = frame_id;
-        Ok(())
-    }
-
-    fn ensure_direct_video_output(&mut self, streaming: &StreamingSession) -> Result<()> {
         let output = streaming.direct_video_output();
-        let output_is_current = self
-            .direct_video_output
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, &output));
-        if !output_is_current && self.direct_video_output.is_some() {
-            self.detach_direct_video_output();
+        if !self.direct_video_output.as_ref().is_some_and(|old| Arc::ptr_eq(old, &output)) {
+            self.detach_video();
+            self.direct_video_output = Some(Arc::clone(&output));
         }
-        if !output.decoder_ready.load(Ordering::Acquire) {
-            return Ok(());
+        let Some((frame_id, frame)) = streaming.video_frame() else { return Ok(()); };
+        if frame_id == self.last_frame_id { return Ok(()); }
+        let layout = frame.layout;
+        if self.video_texture.is_none() {
+            let info = self.canvas.info();
+            anyhow::ensure!(info.name == "VITA gxm" && info.texture_formats.contains(&PixelFormatEnum::NV12), "native Vita GXM NV12 support required");
+            self.video_texture = Some(self.canvas.create_texture_streaming(PixelFormatEnum::NV12, layout.width, layout.height).map_err(anyhow::Error::msg)?);
         }
-        if output_is_current && self.video_textures.is_some() {
-            return Ok(());
+        let metrics = &crate::streaming::video::metrics::METRICS;
+        let start = Instant::now();
+        if self.source.is_some() {
+            let scene = self.scene.take().context("missing GXM completion context before NV12 upload")?;
+            unsafe { sceGxmFinish(scene) };
         }
-
-        self.detach_direct_video_output();
-        let (width, height) = (output.width, output.height);
-        let create_texture = || {
-            self.canvas
-                .create_texture_streaming(PixelFormatEnum::BGR565, width, height)
-                .map_err(anyhow::Error::msg)
-                .context("failed to create direct SDL BGR565 video texture")
-        };
-        let mut textures = [create_texture()?, create_texture()?, create_texture()?];
-        let mut targets = [VideoTextureTarget {
-            ptr: 0,
-            pitch: 0,
-            capacity: 0,
-        }; 3];
-        for (index, texture) in textures.iter_mut().enumerate() {
-            texture
-                .with_lock(None, |pixels, pitch| {
-                    targets[index] = VideoTextureTarget {
-                        ptr: pixels.as_mut_ptr() as usize,
-                        pitch: pitch as u32,
-                        capacity: pixels.len().min(u32::MAX as usize) as u32,
-                    };
-                })
-                .map_err(anyhow::Error::msg)
-                .context("failed to lock direct SDL video texture")?;
+        metrics.gpu_wait_us.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+        let texture = self.video_texture.as_ref().unwrap();
+        let start = Instant::now();
+        let upload = output.with_frame(frame, |base| unsafe {
+            use sdl2::sys::*;
+            SDL_SetYUVConversionMode(SDL_YUV_CONVERSION_MODE::SDL_YUV_CONVERSION_BT709);
+            SDL_UpdateNVTexture(texture.raw(), std::ptr::null(), base, layout.width as i32, base.add(layout.uv_offset as usize), layout.width as i32)
+        });
+        self.last_frame_id = frame_id;
+        if let Some(result) = upload {
+            anyhow::ensure!(result == 0, "NV12 upload failed: {}", sdl2::get_error());
+            metrics.upload_us.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+            let [x, y, w, h] = frame.visible;
+            self.source = Some(sdl2::rect::Rect::new(x as i32, y as i32, w, h));
+            self.video_width = w;
+            self.video_height = h;
+            metrics.presented.fetch_add(1, Ordering::Relaxed);
         }
-        output.set_targets(targets);
-        self.video_textures = Some(textures);
-        self.displayed_video_texture = None;
-        self.direct_video_output = Some(output);
-        self.video_width = width;
-        self.video_height = height;
-        self.last_frame_id = 0;
         Ok(())
     }
 
-    fn detach_direct_video_output(&mut self) {
-        if let Some(output) = self.direct_video_output.take() {
-            output.clear_targets();
+    fn detach_video(&mut self) {
+        if let Some(scene) = self.scene.take() {
+            unsafe { sceGxmFinish(scene) };
         }
-        self.video_textures = None;
-        self.displayed_video_texture = None;
+        if let Some(texture) = self.video_texture.take() {
+            unsafe { texture.destroy() };
+        }
+        self.direct_video_output = None;
+        self.source = None;
         self.video_width = 0;
         self.video_height = 0;
         self.last_frame_id = 0;
     }
 
     pub fn draw_scene(&mut self, show_video: bool) -> Result<()> {
+        SCENE_CAPTURE.with(|capture| capture.set(Some(std::ptr::null_mut())));
         self.canvas.set_draw_color(sdl2::pixels::Color::BLACK);
         self.canvas.clear();
 
         if show_video
-            && let Some(index) = self.displayed_video_texture
-            && let Some(texture) = self
-                .video_textures
-                .as_ref()
-                .map(|textures| &textures[index])
+            && let Some(source) = self.source
+            && let Some(texture) = &self.video_texture
         {
             let destination = self.video_rect();
             self.canvas
-                .copy(texture, None, destination)
+                .copy(texture, source, destination)
                 .map_err(anyhow::Error::msg)
                 .context("failed to draw SDL YUV video frame")?;
         }
@@ -183,6 +176,11 @@ impl VitaSurface {
             textures_delta,
         )?;
         self.canvas.present();
+        let context = SCENE_CAPTURE.with(|capture| capture.take()).filter(|context| !context.is_null());
+        if self.source.is_some() {
+            self.scene = context.or(self.scene);
+            anyhow::ensure!(self.scene.is_some(), "missing GXM completion context after NV12 draw");
+        }
         Ok(())
     }
 
