@@ -2,7 +2,7 @@
   <img src="assets/greenvita.svg" alt="GreenVita" width="220">
 </p>
 
-<h1 align="center">GreenVita</h1>
+<h1 align="center">Turbo GreenVita</h1>
 
 <p align="center">
   Xbox Cloud Gaming on PlayStation Vita.
@@ -26,11 +26,11 @@
 You need a homebrew-enabled PS Vita with VitaShell and an Xbox account that has
 access to Xbox Cloud Gaming.
 
-1. Download `green-vita.vpk` from the
-   [latest release](https://github.com/Day-OS/green-vita/releases/latest).
+1. Download `turbo-green-vita.vpk` from the
+   [latest release](https://github.com/PoissMi/turbo-green-vita/releases/latest).
 2. Transfer the VPK to the Vita.
 3. Install it with VitaShell.
-4. Launch GreenVita and complete the device-code sign-in.
+4. Launch Turbo GreenVita and complete the device-code sign-in.
 
 > [!IMPORTANT]
 > Enable **Unsafe Homebrew** in HENkaku Settings. GreenVita needs access to the
@@ -86,7 +86,7 @@ for its complete command reference.
 
 ### 3. Build the VPK
 
-From the GreenVita repository:
+From the Turbo GreenVita repository:
 
 ```sh
 make vpk
@@ -95,7 +95,7 @@ make vpk
 The Makefile supplies the required Vita Rust flags. The resulting package is:
 
 ```text
-target/armv7-sony-vita-newlibeabihf/release/green-vita.vpk
+target/armv7-sony-vita-newlibeabihf/release/turbo-green-vita.vpk
 ```
 
 <details>
@@ -131,7 +131,7 @@ leave its FTP server running.
 make upload-vpk VITA_IP=192.168.0.103
 ```
 
-This uploads the package to `ux0:/data/green-vita.vpk`; it does not install it.
+This uploads the package to `ux0:/data/turbo-green-vita.vpk`; it does not install it.
 Open VitaShell and install that file once. To choose another upload directory:
 
 ```sh
@@ -146,7 +146,7 @@ After the VPK is installed:
 make update-run-vita VITA_IP=192.168.0.103
 ```
 
-This rebuilds `eboot.bin`, replaces `ux0:/app/GREENVITA/eboot.bin`, and starts
+This rebuilds `eboot.bin`, replaces `ux0:/app/TURBOVITA/eboot.bin`, and starts
 the application. `make run-vita VITA_IP=...` is an alias for the same command.
 
 > [!CAUTION]

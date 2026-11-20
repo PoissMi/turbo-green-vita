@@ -95,10 +95,61 @@ impl Locale {
     }
 }
 
+/// Upper bound advertised to xCloud in the client capabilities message.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MaxBitrate {
+    #[default]
+    Mbps2 = 2,
+    Mbps5 = 5,
+    Mbps8 = 8,
+    Mbps10 = 10,
+    Mbps15 = 15,
+    Mbps20 = 20,
+    Mbps30 = 30,
+    Mbps40 = 40,
+    Mbps50 = 50,
+}
+
+impl MaxBitrate {
+    pub const ALL: [MaxBitrate; 9] = [
+        Self::Mbps2,
+        Self::Mbps5,
+        Self::Mbps8,
+        Self::Mbps10,
+        Self::Mbps15,
+        Self::Mbps20,
+        Self::Mbps30,
+        Self::Mbps40,
+        Self::Mbps50,
+    ];
+
+    /// Display label, e.g. `"15 Mbps"`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Mbps2 => "2 Mbps",
+            Self::Mbps5 => "5 Mbps",
+            Self::Mbps8 => "8 Mbps",
+            Self::Mbps10 => "10 Mbps",
+            Self::Mbps15 => "15 Mbps",
+            Self::Mbps20 => "20 Mbps",
+            Self::Mbps30 => "30 Mbps",
+            Self::Mbps40 => "40 Mbps",
+            Self::Mbps50 => "50 Mbps",
+        }
+    }
+
+    /// Value for the `maxBitrateKbps` capability field.
+    pub fn kbps(self) -> u32 {
+        self as u32 * 1000
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub locale: Locale,
+    /// Advertised to xCloud when a new stream starts; changing it doesn't affect a running stream.
+    pub max_bitrate: MaxBitrate,
     /// Shows internal stream/session state on the `Streaming` screen. Off by default.
     pub show_stream_debug_info: bool,
     pub game_profiles: HashMap<String, GameProfile>,
@@ -129,6 +180,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             locale: Locale::default(),
+            max_bitrate: MaxBitrate::default(),
             show_stream_debug_info: false,
             game_profiles: HashMap::new(),
         }

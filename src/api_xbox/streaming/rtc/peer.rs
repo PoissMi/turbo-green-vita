@@ -15,7 +15,11 @@ use rtc::rtp_transceiver::rtp_sender::{
     RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind,
 };
 
-pub(super) fn create() -> Result<(RTCPeerConnection, XboxRtcProtocol)> {
+pub(super) fn create(
+    max_bitrate_kbps: u32,
+    video_width: u32,
+    video_height: u32,
+) -> Result<(RTCPeerConnection, XboxRtcProtocol)> {
     let mut media_engine = MediaEngine::default();
     register_vita_codecs(&mut media_engine).context("failed to register Vita codecs")?;
 
@@ -42,7 +46,10 @@ pub(super) fn create() -> Result<(RTCPeerConnection, XboxRtcProtocol)> {
         message: ids[3],
     };
 
-    Ok((peer_connection, XboxRtcProtocol::new(channel_ids)))
+    Ok((
+        peer_connection,
+        XboxRtcProtocol::new(channel_ids, max_bitrate_kbps, video_width, video_height),
+    ))
 }
 
 fn register_vita_codecs(media_engine: &mut MediaEngine) -> Result<()> {
@@ -67,7 +74,7 @@ fn register_vita_codecs(media_engine: &mut MediaEngine) -> Result<()> {
                 clock_rate: 90_000,
                 channels: 0,
                 sdp_fmtp_line:
-                    "level-asymmetry-allowed=0;packetization-mode=1;profile-level-id=42e020;max-fs=3600;max-mbps=108000"
+                    "level-asymmetry-allowed=0;packetization-mode=1;profile-level-id=42e020;max-fs=3600;max-mbps=216000"
                         .to_owned(),
                 rtcp_feedback: vec![
                     RTCPFeedback {

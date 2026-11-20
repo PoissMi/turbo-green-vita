@@ -2,7 +2,7 @@
 
 RUSTFLAGS ?= -C target-feature=-neon
 CARGO_VITA ?= cargo +nightly vita
-VPK := target/armv7-sony-vita-newlibeabihf/release/green-vita.vpk
+VPK := target/armv7-sony-vita-newlibeabihf/release/turbo-green-vita.vpk
 VITA_UPLOAD_DIR ?= ux0:/data/
 
 vpk:

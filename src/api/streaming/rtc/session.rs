@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const KEYFRAME_REQUEST_COOLDOWN: Duration = Duration::from_millis(300);
+const BANDWIDTH_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 const INITIAL_VIDEO_GRACE: Duration = Duration::from_millis(500);
 const INITIAL_VIDEO_KEYFRAME_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -23,6 +24,7 @@ pub(crate) struct RtcSessionConfig {
     pub route_probe: &'static str,
     pub audio_sample_rate: u32,
     pub audio_payload_type: u8,
+    pub max_video_bitrate_kbps: u32,
     pub decoder: DecoderConfig,
 }
 
@@ -52,6 +54,8 @@ pub(crate) struct RtcSession<B: RtcSessionBackend> {
     pub connection_state: RTCPeerConnectionState,
     pub(crate) video: VideoReceiver,
     pub(crate) audio: AudioReceiver,
+    max_video_bitrate_kbps: u32,
+    last_bandwidth_report: Option<Instant>,
     last_keyframe_request: Option<Instant>,
     initial_video_watchdog_started_at: Option<Instant>,
     last_initial_video_keyframe_request: Option<Instant>,
@@ -76,6 +80,8 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             connection_state: RTCPeerConnectionState::New,
             video,
             audio: AudioReceiver::new(config.audio_sample_rate, config.audio_payload_type),
+            max_video_bitrate_kbps: config.max_video_bitrate_kbps,
+            last_bandwidth_report: None,
             last_keyframe_request: None,
             initial_video_watchdog_started_at: None,
             last_initial_video_keyframe_request: None,
@@ -132,12 +138,23 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             keyframe_requested = true;
         }
         self.request_keyframe(keyframe_requested, now);
+        if self
+            .last_bandwidth_report
+            .is_none_or(|previous| now.duration_since(previous) >= BANDWIDTH_REPORT_INTERVAL)
+        {
+            self.last_bandwidth_report = Some(now);
+            self.video.send_bandwidth_estimate(
+                &mut self.peer,
+                (self.max_video_bitrate_kbps * 1000) as f32,
+            );
+        }
         if let Some(status) = self.video.status(now) {
-            self.status = if let Some((width, height)) = self.backend.server_video_size() {
-                format!("srv:{width}x{height} {status}")
-            } else {
-                format!("srv:? {status}")
-            };
+            let server = self
+                .backend
+                .server_video_size()
+                .map(|(width, height)| format!("srv:{width}x{height}"))
+                .unwrap_or_else(|| "srv:?".to_owned());
+            self.status = format!("cap:{}kbps {server} {status}", self.max_video_bitrate_kbps);
             eprintln!("{}", self.status);
         }
 

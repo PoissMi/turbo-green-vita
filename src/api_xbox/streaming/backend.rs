@@ -28,8 +28,8 @@ pub(crate) struct XboxStreamingBackend {
 }
 
 impl XboxStreamingBackend {
-    pub(crate) fn start(stream: Stream) -> Result<Self> {
-        let worker = worker::spawn(stream.clone())?;
+    pub(crate) fn start(stream: Stream, max_bitrate_kbps: u32) -> Result<Self> {
+        let worker = worker::spawn(stream.clone(), max_bitrate_kbps)?;
         Ok(Self {
             stream,
             worker,

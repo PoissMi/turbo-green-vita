@@ -25,7 +25,7 @@ pub struct VitaSurface {
 impl VitaSurface {
     pub fn new(video: &sdl2::VideoSubsystem) -> Result<Self> {
         let window = video
-            .window("GreenVita", WIDTH, HEIGHT)
+            .window("Turbo GreenVita", WIDTH, HEIGHT)
             .position_centered()
             .build()
             .context("failed to create SDL Vita window")?;

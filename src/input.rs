@@ -36,6 +36,11 @@ pub fn map_controller_button_event(event: &Event) -> Option<AppCommand> {
         Event::ControllerButtonDown {
             button: Button::A, ..
         } => Some(InputCommand::Confirm.into()),
+        // Select opens the profile menu, which otherwise needs a touch tap on the avatar.
+        Event::ControllerButtonDown {
+            button: Button::Back,
+            ..
+        } => Some(crate::app::ui::header::Command::Toggle.into()),
         _ => None,
     }
 }

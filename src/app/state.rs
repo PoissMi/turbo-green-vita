@@ -50,6 +50,7 @@ pub(crate) enum AppState {
         selected: usize,
         title_id: Option<String>,
         locale_expanded: bool,
+        bitrate_expanded: bool,
     },
     Error {
         reason: String,

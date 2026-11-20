@@ -190,6 +190,7 @@ impl App {
             selected: 0,
             title_id,
             locale_expanded: false,
+            bitrate_expanded: false,
         });
     }
 }

@@ -18,16 +18,27 @@ pub(super) struct XboxRtcProtocol {
     input_queue: InputQueue,
     input_channel_ready: bool,
     server_video_size: Option<(u32, u32)>,
+    max_bitrate_kbps: u32,
+    video_width: u32,
+    video_height: u32,
     channel_ids: ChannelIds,
 }
 
 impl XboxRtcProtocol {
-    pub(super) fn new(channel_ids: ChannelIds) -> Self {
+    pub(super) fn new(
+        channel_ids: ChannelIds,
+        max_bitrate_kbps: u32,
+        video_width: u32,
+        video_height: u32,
+    ) -> Self {
         Self {
             handshake_stage: HandshakeStage::WaitingForChannels,
             input_queue: InputQueue::default(),
             input_channel_ready: false,
             server_video_size: None,
+            max_bitrate_kbps,
+            video_width,
+            video_height,
             channel_ids,
         }
     }
@@ -90,6 +101,9 @@ impl XboxRtcProtocol {
         channel::handle_data_channel_message(
             peer,
             &channel_ids,
+            self.max_bitrate_kbps,
+            self.video_width,
+            self.video_height,
             &mut self.handshake_stage,
             channel_id,
             data,

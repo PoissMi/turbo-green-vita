@@ -4,7 +4,7 @@ use crate::app::ui::header::show_header_row;
 use crate::app::ui::theme::Theme;
 use crate::app::ui::widgets::smooth_scroll_area;
 use crate::i18n::{I18n, arg_string};
-use crate::{App, AppCommand, AppState, Locale};
+use crate::{App, AppCommand, AppState, Locale, MaxBitrate};
 use anyhow::Result;
 use fluent_bundle::FluentArgs;
 
@@ -12,6 +12,8 @@ use fluent_bundle::FluentArgs;
 pub enum Command {
     ToggleLocaleExpanded,
     SetLocale(Locale),
+    ToggleBitrateExpanded,
+    SetMaxBitrate(MaxBitrate),
     SetSwapShouldersAndTriggers { title_id: String, enabled: bool },
     SetRearTouchEnabled { title_id: String, enabled: bool },
     SetFrontTouchAuxiliaryButtons { title_id: String, enabled: bool },
@@ -22,6 +24,8 @@ pub enum Command {
 enum SettingsRow {
     LocaleToggle,
     LocaleOption(Locale),
+    BitrateToggle,
+    BitrateOption(MaxBitrate),
     GameSwap { title_id: String, enabled: bool },
     GameRearTouch { title_id: String, enabled: bool },
     GameFrontTouchAuxiliary { title_id: String, enabled: bool },
@@ -33,6 +37,7 @@ fn settings_rows(app: &App) -> Vec<SettingsRow> {
     let AppState::Settings {
         title_id,
         locale_expanded,
+        bitrate_expanded,
         ..
     } = &app.state
     else {
@@ -42,6 +47,15 @@ fn settings_rows(app: &App) -> Vec<SettingsRow> {
     rows.push(SettingsRow::LocaleToggle);
     if *locale_expanded {
         rows.extend(Locale::ALL.iter().copied().map(SettingsRow::LocaleOption));
+    }
+    rows.push(SettingsRow::BitrateToggle);
+    if *bitrate_expanded {
+        rows.extend(
+            MaxBitrate::ALL
+                .iter()
+                .copied()
+                .map(SettingsRow::BitrateOption),
+        );
     }
     if let Some(title_id) = title_id.clone() {
         let enabled = app
@@ -73,6 +87,11 @@ fn settings_rows(app: &App) -> Vec<SettingsRow> {
     rows
 }
 
+/// Row index of the bitrate toggle, which shifts as the locale option list expands.
+fn bitrate_toggle_index(locale_expanded: bool) -> usize {
+    1 + if locale_expanded { Locale::ALL.len() } else { 0 }
+}
+
 /// Editable settings, persisted immediately on each change. Every interactive row is a
 /// `SelectableLabel` (`focus_row`) addressed by one flat index, so
 /// D-pad + Confirm can reach every row, not just touch.
@@ -82,6 +101,7 @@ pub(crate) fn show(ctx: &egui::Context, app: &App, commands: &mut Vec<AppCommand
     let AppState::Settings {
         title_id,
         locale_expanded,
+        bitrate_expanded,
         selected,
         ..
     } = &app.state
@@ -90,6 +110,7 @@ pub(crate) fn show(ctx: &egui::Context, app: &App, commands: &mut Vec<AppCommand
     };
     let title_id = title_id.clone();
     let locale_expanded = *locale_expanded;
+    let bitrate_expanded = *bitrate_expanded;
     let selected_index = *selected;
     let mut frame = egui::Frame::central_panel(&ctx.style());
     frame.fill = theme.background;
@@ -123,6 +144,34 @@ pub(crate) fn show(ctx: &egui::Context, app: &App, commands: &mut Vec<AppCommand
                         }
                         if focus_row(ui, selected_index == row_index, text) {
                             commands.push(Command::SetLocale(option).into());
+                        }
+                        row_index += 1;
+                    }
+                }
+
+                ui.add_space(14.0);
+                ui.separator();
+                ui.heading(
+                    egui::RichText::new(i18n.text("settings-max-bitrate")).color(theme.text_bright),
+                );
+                let toggle_label = format!(
+                    "{}  {}",
+                    app.settings.max_bitrate.label(),
+                    if bitrate_expanded { "v" } else { ">" }
+                );
+                if focus_row(ui, selected_index == row_index, toggle_label) {
+                    commands.push(Command::ToggleBitrateExpanded.into());
+                }
+                row_index += 1;
+
+                if bitrate_expanded {
+                    for option in MaxBitrate::ALL.iter().copied() {
+                        let mut text = egui::RichText::new(option.label());
+                        if app.settings.max_bitrate == option {
+                            text = text.color(theme.accent).strong();
+                        }
+                        if focus_row(ui, selected_index == row_index, text) {
+                            commands.push(Command::SetMaxBitrate(option).into());
                         }
                         row_index += 1;
                     }
@@ -374,6 +423,12 @@ impl App {
             SettingsRow::LocaleOption(locale) => {
                 return self.handle_settings_command(Command::SetLocale(*locale));
             }
+            SettingsRow::BitrateToggle => {
+                return self.handle_settings_command(Command::ToggleBitrateExpanded);
+            }
+            SettingsRow::BitrateOption(bitrate) => {
+                return self.handle_settings_command(Command::SetMaxBitrate(*bitrate));
+            }
             SettingsRow::GameSwap { title_id, enabled } => {
                 return self.handle_settings_command(Command::SetSwapShouldersAndTriggers {
                     title_id: title_id.clone(),
@@ -450,6 +505,42 @@ impl App {
                 {
                     *locale_expanded = false;
                     *selected = 0;
+                }
+            }
+            Command::ToggleBitrateExpanded => {
+                let AppState::Settings {
+                    locale_expanded,
+                    bitrate_expanded,
+                    selected,
+                    ..
+                } = &mut self.state
+                else {
+                    return Ok(());
+                };
+                let expanded = !*bitrate_expanded;
+                *selected = if expanded {
+                    let current = MaxBitrate::ALL
+                        .iter()
+                        .position(|&bitrate| bitrate == self.settings.max_bitrate)
+                        .unwrap_or(0);
+                    bitrate_toggle_index(*locale_expanded) + 1 + current
+                } else {
+                    bitrate_toggle_index(*locale_expanded)
+                };
+                *bitrate_expanded = expanded;
+            }
+            Command::SetMaxBitrate(bitrate) => {
+                self.settings.max_bitrate = bitrate;
+                self.settings.save();
+                if let AppState::Settings {
+                    locale_expanded,
+                    bitrate_expanded,
+                    selected,
+                    ..
+                } = &mut self.state
+                {
+                    *bitrate_expanded = false;
+                    *selected = bitrate_toggle_index(*locale_expanded);
                 }
             }
             Command::SetSwapShouldersAndTriggers { title_id, enabled } => {

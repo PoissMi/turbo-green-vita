@@ -144,53 +144,46 @@ pub(crate) fn show_hamburger_menu(
         commands.push(Command::Toggle.into());
     }
 
-    // `App::menu_open` is the source of truth; synced into egui's popup memory each frame.
-    ui.memory_mut(|memory| {
-        let currently_open = memory.is_popup_open(popup_id);
-        if app.menu.open && !currently_open {
-            memory.open_popup(popup_id);
-        } else if !app.menu.open && currently_open {
-            memory.close_popup();
+    // Right-anchored: `egui::popup_below_widget` extends rightwards from the button's left edge,
+    // which puts most of the menu off-screen for this top-right corner button.
+    if app.menu.open {
+        let frame = egui::Frame::popup(&ui.style())
+            .fill(egui::Color32::from_rgb(0x1a, 0x1b, 0x1e))
+            .stroke(egui::Stroke::NONE)
+            .corner_radius(egui::CornerRadius::same(10));
+        let area = egui::Area::new(popup_id)
+            .order(egui::Order::Foreground)
+            .fixed_pos(response.rect.right_bottom() + egui::vec2(0.0, 4.0))
+            .pivot(egui::Align2::RIGHT_TOP)
+            .show(ui.ctx(), |ui| {
+                frame.show(ui, |ui| {
+                    ui.set_min_width(180.0);
+                    for (index, item) in MENU_ITEMS.iter().copied().enumerate() {
+                        if index > 0 {
+                            ui.add_space(4.0);
+                        }
+                        if menu_item(
+                            ui,
+                            theme,
+                            item.icon(),
+                            &i18n.text(item.label_key()),
+                            app.menu.selected == index,
+                        ) {
+                            commands.push(Command::Select(item).into());
+                        }
+                    }
+                });
+            });
+
+        let clicked_outside = ui.input(|input| {
+            input.pointer.any_click()
+                && input.pointer.interact_pos().is_some_and(|pos| {
+                    !area.response.rect.contains(pos) && !response.rect.contains(pos)
+                })
+        });
+        if clicked_outside {
+            commands.push(Command::Close.into());
         }
-    });
-
-    // `popup_below_widget` reads its frame from this `ui`, not the popup content's own.
-    let previous_visuals = ui.style().visuals.clone();
-    {
-        let visuals = &mut ui.style_mut().visuals;
-        visuals.window_fill = egui::Color32::from_rgb(0x1a, 0x1b, 0x1e);
-        visuals.window_stroke = egui::Stroke::NONE;
-        visuals.menu_corner_radius = egui::CornerRadius::same(10);
-    }
-    egui::popup_below_widget(
-        ui,
-        popup_id,
-        &response,
-        egui::PopupCloseBehavior::CloseOnClickOutside,
-        |ui| {
-            // Wider than the fixed 36x36 button it's anchored to, so menu text fits.
-            ui.set_min_width(180.0);
-            for (index, item) in MENU_ITEMS.iter().copied().enumerate() {
-                if index > 0 {
-                    ui.add_space(4.0);
-                }
-                if menu_item(
-                    ui,
-                    theme,
-                    item.icon(),
-                    &i18n.text(item.label_key()),
-                    app.menu.selected == index,
-                ) {
-                    commands.push(Command::Select(item).into());
-                }
-            }
-        },
-    );
-    ui.style_mut().visuals = previous_visuals;
-
-    // egui may have closed the popup itself (click outside) - keep `App` in sync.
-    if app.menu.open && !ui.memory(|memory| memory.is_popup_open(popup_id)) {
-        commands.push(Command::Close.into());
     }
 
     if let Some(avatar) = app.service.avatar.as_ref() {

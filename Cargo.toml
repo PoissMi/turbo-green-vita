@@ -1,5 +1,5 @@
 [package]
-name = "green-vita"
+name = "turbo-green-vita"
 version = "0.1.8"
 edition = "2024"
 
@@ -31,6 +31,6 @@ ring = { git = "https://github.com/vita-rust/ring.git", branch = "v0.17.14-vita"
 rtc-shared = { git = "https://github.com/Day-OS/rtc.git", branch = "vita" }
 
 [package.metadata.vita]
-title_id = "GREENVITA"
-title_name = "GreenVita"
+title_id = "TURBOVITA"
+title_name = "Turbo GreenVita"
 assets = "static"

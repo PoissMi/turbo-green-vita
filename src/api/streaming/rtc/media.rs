@@ -29,6 +29,7 @@ pub(crate) struct VideoReceiver {
     next_frame_id: u64,
     pub(crate) received_packet: bool,
     last_stats_report: Instant,
+    bytes_since_report: u64,
     stats: VideoStats,
 }
 
@@ -41,12 +42,13 @@ impl VideoReceiver {
             track_id: None,
             receiver_id: None,
             ssrc: None,
-            rtp: rtp::VideoRtp::new(),
+            rtp: rtp::VideoRtp::new(config.decode_width, config.decode_height),
             decoder: VideoDecodeWorker::spawn(config, direct_output)?,
             latest_frame: None,
             next_frame_id: 0,
             received_packet: false,
             last_stats_report: Instant::now(),
+            bytes_since_report: 0,
             stats: VideoStats::default(),
         })
     }
@@ -68,6 +70,9 @@ impl VideoReceiver {
 
     pub(crate) fn receive(&mut self, packet: Packet, keyframe_requested: &mut bool) {
         self.received_packet = true;
+        self.bytes_since_report = self
+            .bytes_since_report
+            .saturating_add(packet.payload.len() as u64);
         let sample_stats = self.rtp.receive(&self.decoder, packet, keyframe_requested);
         self.stats.dropped = self
             .stats
@@ -123,11 +128,29 @@ impl VideoReceiver {
         }
     }
 
+    /// Advertises receive bandwidth to the sender via REMB; xCloud uses this to size its encoder.
+    pub(crate) fn send_bandwidth_estimate(&self, peer: &mut RTCPeerConnection, bitrate: f32) {
+        if let (Some(receiver_id), Some(ssrc)) = (self.receiver_id, self.ssrc)
+            && let Some(mut receiver) = peer.rtp_receiver(receiver_id)
+        {
+            let remb = rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate {
+                sender_ssrc: 0,
+                bitrate,
+                ssrcs: vec![ssrc],
+            };
+            let _ = receiver.write_rtcp(vec![Box::new(remb)]);
+        }
+    }
+
     pub(crate) fn status(&mut self, now: Instant) -> Option<String> {
-        if now.duration_since(self.last_stats_report) < STREAM_STATS_INTERVAL {
+        let elapsed = now.duration_since(self.last_stats_report);
+        if elapsed < STREAM_STATS_INTERVAL {
             return None;
         }
         self.last_stats_report = now;
+        let elapsed_ms = elapsed.as_millis().max(1) as u64;
+        let bitrate_kbps = self.bytes_since_report.saturating_mul(8) / elapsed_ms;
+        self.bytes_since_report = 0;
 
         let performance = crate::streaming::video::video_performance_summary();
         let source_fps = self
@@ -142,7 +165,7 @@ impl VideoReceiver {
             .map(|(width, height)| format!("{width}x{height}"))
             .unwrap_or_else(|| "?".to_owned());
         Some(format!(
-            "enc:{encoded_resolution} srcfps:{source_fps} {performance} wait:{} drop:{} err:{}",
+            "net:{bitrate_kbps}kbps enc:{encoded_resolution} srcfps:{source_fps} {performance} wait:{} drop:{} err:{}",
             u8::from(self.rtp.waiting_for_keyframe()),
             self.stats.dropped,
             self.stats.decode_errors,

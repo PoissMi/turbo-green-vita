@@ -1,4 +1,4 @@
-use crate::streaming::video::{STREAM_HEIGHT, STREAM_WIDTH, VideoDecodeWorker};
+use crate::streaming::video::VideoDecodeWorker;
 use bytes::Bytes;
 use h264_reader::annexb::AnnexBReader;
 use h264_reader::nal::sps::SeqParameterSet;
@@ -64,6 +64,8 @@ pub(super) struct VideoRtp {
     damage_score: u8,
     stream_too_large: bool,
     waiting_for_keyframe: bool,
+    max_width: u32,
+    max_height: u32,
 }
 
 struct PendingVideoFrame {
@@ -152,7 +154,7 @@ impl PendingVideoFrame {
 }
 
 impl VideoRtp {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(max_width: u32, max_height: u32) -> Self {
         Self {
             depacketizer: H264Packet::default(),
             pending: None,
@@ -162,6 +164,8 @@ impl VideoRtp {
             damage_score: 0,
             stream_too_large: false,
             waiting_for_keyframe: false,
+            max_width,
+            max_height,
         }
     }
 
@@ -270,11 +274,11 @@ impl VideoRtp {
         stats.encoded_resolution = unit.resolution;
         let sample_too_large = unit
             .resolution
-            .is_some_and(|(width, height)| width > STREAM_WIDTH || height > STREAM_HEIGHT);
+            .is_some_and(|(width, height)| width > self.max_width || height > self.max_height);
         if sample_too_large {
             eprintln!(
                 "Dropping H264 access unit larger than decoder: {:?} > {}x{}",
-                unit.resolution, STREAM_WIDTH, STREAM_HEIGHT
+                unit.resolution, self.max_width, self.max_height
             );
             self.stream_too_large = true;
             // Flush queued decoder work once, then wait for a compatible IDR instead of feeding

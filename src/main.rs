@@ -17,7 +17,7 @@ use api_xbox::api::{
 use api_xbox::auth::{DeviceCodeAuth, DeviceCodePoll, MsalAuth, StreamingCredentials, XboxProfile};
 use api_xbox::stream::{Stream, StreamState};
 use app::{App, AppCommand, AppState, InputCommand, NavigationCommand};
-use settings::Locale;
+use settings::{Locale, MaxBitrate};
 
 #[used]
 #[unsafe(export_name = "sceUserMainThreadStackSize")]

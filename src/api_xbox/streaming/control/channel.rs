@@ -5,7 +5,6 @@ use uuid::Uuid;
 
 use crate::api::streaming::rtc::peer::RtcDataChannelConfig;
 use crate::api_xbox::streaming::rtc::protocol::ChannelIds;
-use crate::streaming::video::{STREAM_HEIGHT, STREAM_WIDTH};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum HandshakeStage {
@@ -17,6 +16,9 @@ pub enum HandshakeStage {
 pub(in crate::api_xbox::streaming) fn handle_data_channel_message(
     pc: &mut RTCPeerConnection,
     ids: &ChannelIds,
+    max_bitrate_kbps: u32,
+    video_width: u32,
+    video_height: u32,
     handshake_stage: &mut HandshakeStage,
     channel_id: RTCDataChannelId,
     data: &[u8],
@@ -36,7 +38,7 @@ pub(in crate::api_xbox::streaming) fn handle_data_channel_message(
         let _ = control_channel.send_text(gamepad_changed(0, true).to_string());
     }
     if let Some(mut message_channel) = pc.data_channel(ids.message) {
-        for message in startup_messages() {
+        for message in startup_messages(max_bitrate_kbps, video_width, video_height) {
             let _ = message_channel.send_text(message.to_string());
         }
     }
@@ -132,10 +134,7 @@ pub fn generate_message(path: &str, data: Value) -> Value {
     })
 }
 
-pub fn startup_messages() -> Vec<Value> {
-    let width = STREAM_WIDTH;
-    let height = STREAM_HEIGHT;
-
+pub fn startup_messages(max_bitrate_kbps: u32, width: u32, height: u32) -> Vec<Value> {
     vec![
         generate_message(
             "/streaming/systemUi/configuration",
@@ -162,16 +161,16 @@ pub fn startup_messages() -> Vec<Value> {
                 "supportsCustomResolution": true,
                 "supportsHevc": false,
                 "supportsHdr": false,
-                "supportsFps": 30,
+                "supportsFps": 60,
                 "maxWidth": width,
                 "maxHeight": height,
-                "maxBitrateKbps": 2000,
+                "maxBitrateKbps": max_bitrate_kbps,
                 "video": {
                     "width": width,
                     "height": height,
                     "maxWidth": width,
                     "maxHeight": height,
-                    "maxBitrateKbps": 2000,
+                    "maxBitrateKbps": max_bitrate_kbps,
                 },
             }),
         ),
