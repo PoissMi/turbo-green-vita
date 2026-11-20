@@ -75,6 +75,10 @@ impl XboxStreamingBackend {
         Arc::clone(&self.worker.direct_video_output)
     }
 
+    pub(crate) fn frame_ready(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.worker.frame_ready)
+    }
+
     pub(crate) fn send_gamepad_frame(&self, frame: GamepadFrame) {
         self.worker.send_gamepad_frame(frame);
     }

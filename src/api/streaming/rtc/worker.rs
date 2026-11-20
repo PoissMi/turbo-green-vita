@@ -53,6 +53,7 @@ pub struct RtcWorker {
     pub(crate) events_rx: Receiver<RtcWorkerEvent>,
     pub(crate) audio_rx: Receiver<Vec<Bytes>>,
     pub(crate) latest_frame: Arc<Mutex<Option<(u64, DecodedFrame)>>>,
+    pub(crate) frame_ready: Arc<tokio::sync::Notify>,
     latest_gamepad: Arc<Mutex<Option<SampledGamepadFrame>>>,
     gamepad_pulses: Arc<Mutex<VecDeque<GamepadFrame>>>,
     pub(crate) direct_video_output: Arc<DirectVideoOutput>,
@@ -65,6 +66,8 @@ impl RtcWorker {
         let (audio_tx, audio_rx) = sync_channel(MAX_PENDING_AUDIO_BATCHES);
         let latest_frame = Arc::new(Mutex::new(None));
         let worker_latest_frame = Arc::clone(&latest_frame);
+        let frame_ready = Arc::new(tokio::sync::Notify::new());
+        let worker_frame_ready = Arc::clone(&frame_ready);
         let latest_gamepad = Arc::new(Mutex::new(None));
         let worker_latest_gamepad = Arc::clone(&latest_gamepad);
         let gamepad_pulses = Arc::new(Mutex::new(VecDeque::new()));
@@ -83,6 +86,7 @@ impl RtcWorker {
                         events_tx.clone(),
                         audio_tx,
                         worker_latest_frame,
+                        worker_frame_ready,
                         worker_latest_gamepad,
                         worker_gamepad_pulses,
                         worker_direct_video_output,
@@ -110,6 +114,7 @@ impl RtcWorker {
             events_rx,
             audio_rx,
             latest_frame,
+            frame_ready,
             latest_gamepad,
             gamepad_pulses,
             direct_video_output,
@@ -152,6 +157,7 @@ fn run_worker_thread<P: RtcWorkerProvider>(
     events_tx: SyncSender<RtcWorkerEvent>,
     audio_tx: SyncSender<Vec<Bytes>>,
     latest_frame: Arc<Mutex<Option<(u64, DecodedFrame)>>>,
+    frame_ready: Arc<tokio::sync::Notify>,
     latest_gamepad: Arc<Mutex<Option<SampledGamepadFrame>>>,
     gamepad_pulses: Arc<Mutex<VecDeque<GamepadFrame>>>,
     direct_video_output: Arc<DirectVideoOutput>,
@@ -188,6 +194,7 @@ fn run_worker_thread<P: RtcWorkerProvider>(
             events_tx,
             audio_tx,
             latest_frame,
+            frame_ready,
             latest_gamepad,
             gamepad_pulses,
         )
@@ -224,6 +231,7 @@ async fn run_session<B: super::session::RtcSessionBackend>(
     events_tx: SyncSender<RtcWorkerEvent>,
     audio_tx: SyncSender<Vec<Bytes>>,
     latest_frame: Arc<Mutex<Option<(u64, DecodedFrame)>>>,
+    frame_ready: Arc<tokio::sync::Notify>,
     latest_gamepad: Arc<Mutex<Option<SampledGamepadFrame>>>,
     gamepad_pulses: Arc<Mutex<VecDeque<GamepadFrame>>>,
 ) -> Result<()> {
@@ -318,6 +326,7 @@ async fn run_session<B: super::session::RtcSessionBackend>(
             && let Ok(mut latest) = latest_frame.lock()
         {
             *latest = Some(frame);
+            frame_ready.notify_one();
         }
 
         if session.status != last_status || session.connection_state != last_connection_state {

@@ -5,6 +5,17 @@ use anyhow::{Result, bail};
 use std::os::raw::c_void;
 use vitasdk_sys::*;
 
+// Exported by SceVideodecLowDelayUser (library NID 0x6354EEFF), not by SceVideodecUser which
+// the SDK's libSceVideodec_stub.a imports from — that stub resolves to NULL on-device and the
+// call crashes. build.rs assembles vita-stubs/SceVideodecLowDelayUser.S under a renamed symbol
+// (same approach as vita-moonlight's custom stub).
+unsafe extern "C" {
+    #[link_name = "sceAvcdecSetLowDelayModeNongameapp_ld"]
+    fn sceAvcdecSetLowDelayModeNongameapp(codec: SceVideodecType, mode: i32) -> i32;
+}
+
+const SCE_AVCDEC_DELAY_MODE_LOW: i32 = 0;
+
 // Matches vita-moonlight's decoder config: streams using B-frames need more than one
 // reference picture, and a single reference produces visible corruption during motion.
 const AVCDEC_NUM_REF_FRAMES: u32 = 4;
@@ -35,6 +46,14 @@ impl AvcdecLibrary {
                 );
             }
         };
+
+        // Shrink the decoder's internal reorder queue (vita-moonlight does the same); without
+        // it, B-frame streams buffer several AUs before the first picture comes out.
+        let low_delay_ret =
+            unsafe { sceAvcdecSetLowDelayModeNongameapp(SCE_VIDEODEC_TYPE_HW_AVCDEC, SCE_AVCDEC_DELAY_MODE_LOW) };
+        if low_delay_ret < 0 {
+            eprintln!("sceAvcdecSetLowDelayModeNongameapp failed: {low_delay_ret:#x}; continuing");
+        }
 
         let init_info = SceVideodecQueryInitInfoHwAvcdec {
             size: size_of::<SceVideodecQueryInitInfoHwAvcdec>() as u32,

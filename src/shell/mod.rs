@@ -243,10 +243,25 @@ pub async fn run(mut app: App) -> Result<()> {
             &full_output.textures_delta,
         )?;
         let frame_deadline = loop_started_at + TARGET_FRAME_TIME;
+        // While streaming, a decoded frame wakes the loop early instead of waiting out the
+        // frame budget; the deadline still caps latency for UI/input when the stream stalls.
+        let frame_ready = app
+            .state
+            .streaming()
+            .filter(|streaming| !streaming.paused)
+            .map(|streaming| streaming.frame_ready());
         if Instant::now() < frame_deadline {
             while Instant::now() < frame_deadline {
                 let remaining = frame_deadline.saturating_duration_since(Instant::now());
-                sleep(remaining.min(STREAM_INPUT_POLL_INTERVAL)).await;
+                let wait = remaining.min(STREAM_INPUT_POLL_INTERVAL);
+                if let Some(frame_ready) = &frame_ready {
+                    tokio::select! {
+                        _ = sleep(wait) => {}
+                        _ = frame_ready.notified() => {}
+                    }
+                } else {
+                    sleep(wait).await;
+                }
                 if Instant::now() >= frame_deadline {
                     break;
                 }

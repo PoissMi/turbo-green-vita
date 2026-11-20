@@ -79,6 +79,10 @@ impl StreamingSession {
         self.backend.direct_video_output()
     }
 
+    pub(crate) fn frame_ready(&self) -> Arc<tokio::sync::Notify> {
+        self.backend.frame_ready()
+    }
+
     pub(crate) fn send_gamepad_frame(&mut self, mut frame: GamepadFrame, settings: &Settings) {
         if self.ignore_confirm_until_release {
             if frame.a > 0.0 {

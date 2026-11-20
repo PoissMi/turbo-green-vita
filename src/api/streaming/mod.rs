@@ -51,6 +51,12 @@ impl PlaybackBackend {
         }
     }
 
+    pub(crate) fn frame_ready(&self) -> Arc<tokio::sync::Notify> {
+        match self {
+            Self::Xbox(backend) => backend.frame_ready(),
+        }
+    }
+
     pub(crate) fn send_gamepad_frame(&self, frame: GamepadFrame) {
         match self {
             Self::Xbox(backend) => backend.send_gamepad_frame(frame),

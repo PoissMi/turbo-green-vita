@@ -100,41 +100,37 @@ impl Locale {
 pub enum MaxBitrate {
     #[default]
     Mbps2 = 2,
+    Mbps3 = 3,
+    Mbps4 = 4,
     Mbps5 = 5,
+    Mbps6 = 6,
     Mbps8 = 8,
+    // Legacy settings saved with removed options (15–50 Mbps) deserialize to this variant.
+    #[serde(other)]
     Mbps10 = 10,
-    Mbps15 = 15,
-    Mbps20 = 20,
-    Mbps30 = 30,
-    Mbps40 = 40,
-    Mbps50 = 50,
 }
 
 impl MaxBitrate {
-    pub const ALL: [MaxBitrate; 9] = [
+    pub const ALL: [MaxBitrate; 7] = [
         Self::Mbps2,
+        Self::Mbps3,
+        Self::Mbps4,
         Self::Mbps5,
+        Self::Mbps6,
         Self::Mbps8,
         Self::Mbps10,
-        Self::Mbps15,
-        Self::Mbps20,
-        Self::Mbps30,
-        Self::Mbps40,
-        Self::Mbps50,
     ];
 
-    /// Display label, e.g. `"15 Mbps"`.
+    /// Display label, e.g. `"8 Mbps"`.
     pub fn label(self) -> &'static str {
         match self {
             Self::Mbps2 => "2 Mbps",
+            Self::Mbps3 => "3 Mbps",
+            Self::Mbps4 => "4 Mbps",
             Self::Mbps5 => "5 Mbps",
+            Self::Mbps6 => "6 Mbps",
             Self::Mbps8 => "8 Mbps",
             Self::Mbps10 => "10 Mbps",
-            Self::Mbps15 => "15 Mbps",
-            Self::Mbps20 => "20 Mbps",
-            Self::Mbps30 => "30 Mbps",
-            Self::Mbps40 => "40 Mbps",
-            Self::Mbps50 => "50 Mbps",
         }
     }
 

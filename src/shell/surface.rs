@@ -13,7 +13,7 @@ pub const HEIGHT: u32 = 544;
 
 pub struct VitaSurface {
     pub(crate) canvas: Canvas<Window>,
-    video_textures: Option<[Texture; 2]>,
+    video_textures: Option<[Texture; 3]>,
     displayed_video_texture: Option<usize>,
     direct_video_output: Option<Arc<DirectVideoOutput>>,
     video_width: u32,
@@ -71,7 +71,7 @@ impl VitaSurface {
             return Ok(());
         }
         let index = frame.texture_index;
-        if index >= 2 {
+        if index >= 3 {
             anyhow::bail!("decoder returned invalid direct texture index {index}");
         }
         if let Some(output) = &self.direct_video_output {
@@ -109,19 +109,12 @@ impl VitaSurface {
                 .map_err(anyhow::Error::msg)
                 .context("failed to create direct SDL BGR565 video texture")
         };
-        let mut textures = [create_texture()?, create_texture()?];
-        let mut targets = [
-            VideoTextureTarget {
-                ptr: 0,
-                pitch: 0,
-                capacity: 0,
-            },
-            VideoTextureTarget {
-                ptr: 0,
-                pitch: 0,
-                capacity: 0,
-            },
-        ];
+        let mut textures = [create_texture()?, create_texture()?, create_texture()?];
+        let mut targets = [VideoTextureTarget {
+            ptr: 0,
+            pitch: 0,
+            capacity: 0,
+        }; 3];
         for (index, texture) in textures.iter_mut().enumerate() {
             texture
                 .with_lock(None, |pixels, pitch| {

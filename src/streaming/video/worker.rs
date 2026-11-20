@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-// Faster streams arrive in larger bursts. Keep the normal 30 fps limit small, but
-// allow enough room for roughly 100 ms of compressed video near the observed 55 fps.
-const MIN_PENDING_ACCESS_UNITS: usize = 2;
+// Faster streams arrive in larger bursts. Keep a small buffer at 30 fps (vita-moonlight
+// tolerates 4 pending frames before flushing to IDR), with room for ~100 ms near 55 fps.
+const MIN_PENDING_ACCESS_UNITS: usize = 3;
 const MAX_PENDING_ACCESS_UNITS: usize = 6;
 
 struct QueuedAccessUnit {
@@ -205,7 +205,7 @@ fn decode_queued_access_unit(
     }
 
     let Some(direct_target) = direct_output.lock_decode_target() else {
-        // Do not decode until the renderer has registered its two GXM textures. There is no
+        // Do not decode until the renderer has registered its GXM textures. There is no
         // legacy output buffer to copy from anymore.
         metrics::METRICS.skipped.fetch_add(1, Ordering::Relaxed);
         return;
