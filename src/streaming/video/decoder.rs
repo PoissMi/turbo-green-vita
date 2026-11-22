@@ -16,9 +16,10 @@ unsafe extern "C" {
 
 const SCE_AVCDEC_DELAY_MODE_LOW: i32 = 0;
 
-// Matches vita-moonlight's decoder config: streams using B-frames need more than one
-// reference picture, and a single reference produces visible corruption during motion.
-const AVCDEC_NUM_REF_FRAMES: u32 = 4;
+// Test: fewer ref frames = faster HW decode. 4 was chosen to prevent
+// macroblock corruption in motion, but at 720p60 with 5 Mbps it may cost
+// decode time. A/B this against d/a (decode time) and err.
+const AVCDEC_NUM_REF_FRAMES: u32 = 2;
 struct AvcdecLibrary {
     module_loaded: bool,
 }
