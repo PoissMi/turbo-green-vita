@@ -24,6 +24,9 @@ pub(super) struct VideoSampleStats {
     pub dropped: u32,
     pub source_frame_duration_us: Option<u64>,
     pub encoded_resolution: Option<(u32, u32)>,
+    /// Missing sequence numbers to NACK back to the sender (transport
+    /// feedback was negotiated but previously never sent).
+    pub nack_sequence_numbers: Vec<u16>,
 }
 
 pub(super) struct AudioRtp {
@@ -104,6 +107,38 @@ impl PendingVideoFrame {
             .iter()
             .find(|packet| packet.header.marker)
             .map(|packet| packet.header.sequence_number)
+    }
+
+    /// Sequence numbers never seen for this frame (gaps below the marker),
+    /// limited to the transport NACK bitmap window (16 packets).
+    fn missing_sequences(&self) -> Vec<u16> {
+        let Some(marker) = self.marker_sequence() else {
+            return Vec::new();
+        };
+        let present: std::collections::HashSet<u16> =
+            self.packets.iter().map(|p| p.header.sequence_number).collect();
+        // Walk back from marker to first received packet's neighbourhood.
+        // The smallest seen sequence bounds the window.
+        let mut seqs = self.packets.iter().map(|p| p.header.sequence_number).collect::<Vec<_>>();
+        seqs.sort_unstable();
+        let start = seqs.first().copied().unwrap_or(marker);
+        let mut missing = Vec::new();
+        let mut seq = start;
+        // At most 16 iterations: the NACK bitmap covers packet_id + 16 bits.
+        for _ in 0..16 {
+            if !present.contains(&seq) {
+                missing.push(seq);
+            }
+            if seq == marker {
+                break;
+            }
+            seq = seq.wrapping_add(1);
+            // Stop once we've passed the marker forward distance.
+            if marker.wrapping_sub(seq) > 16 {
+                break;
+            }
+        }
+        missing
     }
 
     fn assemble(
@@ -200,6 +235,13 @@ impl VideoRtp {
                 return stats;
             }
             if let Some(incomplete) = self.pending.take() {
+                let missing = incomplete.missing_sequences();
+                if !missing.is_empty() {
+                    // Send NACK for the gaps before discarding the frame:
+                    // a retransmitted packet can still complete it, and the
+                    // damage counter stays honest about the gaps.
+                    stats.nack_sequence_numbers.extend(missing);
+                }
                 self.next_sequence = incomplete
                     .marker_sequence()
                     .map(|sequence| sequence.wrapping_add(1));
