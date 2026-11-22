@@ -595,9 +595,8 @@ impl App {
                     return_selected: selected,
                 });
             }
-            InputCommand::Back => {
-                self.set_state(AppState::ModeSelect { selected: 0 });
-            }
+            InputCommand::Back => {}
+            // TitleList is the root screen (Cloud only): back is a no-op.
         }
 
         Ok(())
