@@ -16,7 +16,6 @@ settings-cloud = Cloud
 settings-home = Casa
 settings-locale = Lingua/regione
 settings-max-bitrate = Bitrate massimo
-settings-frame-rate = Frequenza fotogrammi
 settings-game = Impostazioni gioco
 settings-swap-shoulders-triggers = Scambia L1/L2 e R1/R2
 settings-front-touch-auxiliary-buttons = Usa il touch anteriore per L2/R2/L3/R3 invece del mouse

@@ -16,7 +16,6 @@ settings-cloud = Chmura
 settings-home = Dom
 settings-locale = Język/region
 settings-max-bitrate = Maksymalny bitrate
-settings-frame-rate = Liczba klatek
 settings-game = Ustawienia gry
 settings-swap-shoulders-triggers = Zamień L1/L2 i R1/R2
 settings-front-touch-auxiliary-buttons = Użyj przedniego ekranu dla L2/R2/L3/R3 zamiast myszy

@@ -4,7 +4,7 @@ use crate::app::ui::header::show_header_row;
 use crate::app::ui::theme::Theme;
 use crate::app::ui::widgets::smooth_scroll_area;
 use crate::i18n::{I18n, arg_string};
-use crate::{App, AppCommand, AppState, FrameRate, Locale, MaxBitrate};
+use crate::{App, AppCommand, AppState, Locale, MaxBitrate};
 use anyhow::Result;
 use fluent_bundle::FluentArgs;
 
@@ -14,7 +14,6 @@ pub enum Command {
     SetLocale(Locale),
     ToggleBitrateExpanded,
     SetMaxBitrate(MaxBitrate),
-    SetFrameRate(FrameRate),
     SetSwapShouldersAndTriggers { title_id: String, enabled: bool },
     SetRearTouchEnabled { title_id: String, enabled: bool },
     SetFrontTouchAuxiliaryButtons { title_id: String, enabled: bool },
@@ -27,7 +26,6 @@ enum SettingsRow {
     LocaleOption(Locale),
     BitrateToggle,
     BitrateOption(MaxBitrate),
-    FrameRateOption(FrameRate),
     GameSwap { title_id: String, enabled: bool },
     GameRearTouch { title_id: String, enabled: bool },
     GameFrontTouchAuxiliary { title_id: String, enabled: bool },
@@ -59,7 +57,6 @@ fn settings_rows(app: &App) -> Vec<SettingsRow> {
                 .map(SettingsRow::BitrateOption),
         );
     }
-    rows.extend(FrameRate::ALL.iter().copied().map(SettingsRow::FrameRateOption));
     if let Some(title_id) = title_id.clone() {
         let enabled = app
             .settings
@@ -178,22 +175,6 @@ pub(crate) fn show(ctx: &egui::Context, app: &App, commands: &mut Vec<AppCommand
                         }
                         row_index += 1;
                     }
-                }
-
-                ui.add_space(14.0);
-                ui.separator();
-                ui.heading(
-                    egui::RichText::new(i18n.text("settings-frame-rate")).color(theme.text_bright),
-                );
-                for option in FrameRate::ALL.iter().copied() {
-                    let mut text = egui::RichText::new(option.label());
-                    if app.settings.frame_rate == option {
-                        text = text.color(theme.accent).strong();
-                    }
-                    if focus_row(ui, selected_index == row_index, text) {
-                        commands.push(Command::SetFrameRate(option).into());
-                    }
-                    row_index += 1;
                 }
 
                 if let Some(title_id) = title_id.clone() {
@@ -448,9 +429,6 @@ impl App {
             SettingsRow::BitrateOption(bitrate) => {
                 return self.handle_settings_command(Command::SetMaxBitrate(*bitrate));
             }
-            SettingsRow::FrameRateOption(frame_rate) => {
-                return self.handle_settings_command(Command::SetFrameRate(*frame_rate));
-            }
             SettingsRow::GameSwap { title_id, enabled } => {
                 return self.handle_settings_command(Command::SetSwapShouldersAndTriggers {
                     title_id: title_id.clone(),
@@ -564,10 +542,6 @@ impl App {
                     *bitrate_expanded = false;
                     *selected = bitrate_toggle_index(*locale_expanded);
                 }
-            }
-            Command::SetFrameRate(frame_rate) => {
-                self.settings.frame_rate = frame_rate;
-                self.settings.save();
             }
             Command::SetSwapShouldersAndTriggers { title_id, enabled } => {
                 self.settings

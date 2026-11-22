@@ -63,16 +63,17 @@ pub(super) fn create(
 ///
 /// `max-fs` is the frame size in macroblocks: 3600 is 1280x720. `max-mbps`
 /// is the frame rate in macroblocks per second, so 108000 is 30 fps and
-/// 216000 is 60. It is the one number that decides how hard the server's
-/// encoder has to work, and a 720p60 encode is twice the work of a 720p30
-/// one - when the server cannot finish in real time the finished frames
-/// pile up in front of us and the picture arrives from an older and older
-/// point in the game.
+/// 216000 is 60.
 ///
-/// Upstream asked for 30 fps with the level that goes with it. This fork
-/// doubled both when it moved to 60 fps, and that is the change the late
-/// picture came with. The bitrate cap cannot fix it: the encoder's cost is
-/// per frame, so a lower bitrate barely takes any of that work away.
+/// The server does not take the frame rate from what we ask: the upstream
+/// client asked for 30 fps with this line and was sent 60 fps anyway, and
+/// this client asks for 60 and is sent 60. So the frame rate is not a
+/// setting - it is one number in one place, and the only thing left to
+/// lower the server's load is the bitrate.
+///
+/// The 30 fps line is kept because it is what upstream sends and because
+/// it is the only thing that would change if the server ever started
+/// listening.
 fn video_fmtp_line(video_fps: u32) -> String {
     if video_fps <= 30 {
         "level-asymmetry-allowed=0;packetization-mode=1;profile-level-id=42e01f;max-fs=3600;max-mbps=108000".to_owned()
@@ -81,7 +82,8 @@ fn video_fmtp_line(video_fps: u32) -> String {
     }
 }
 
-fn register_vita_codecs(media_engine: &mut MediaEngine, video_fps: u32) -> Result<()> {    media_engine.register_codec(
+fn register_vita_codecs(media_engine: &mut MediaEngine, video_fps: u32) -> Result<()> {
+    media_engine.register_codec(
         RTCRtpCodecParameters {
             rtp_codec: RTCRtpCodec {
                 mime_type: MIME_TYPE_OPUS.to_owned(),

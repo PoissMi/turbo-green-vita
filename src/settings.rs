@@ -140,47 +140,12 @@ impl MaxBitrate {
     }
 }
 
-/// Frame rate asked for from the server.
-///
-/// A 720p60 encode is twice the work of a 720p30 one, and the server is the
-/// side that runs out of time: when it cannot finish the frames in real
-/// time they pile up in front of the client and the picture falls behind
-/// the sound. The request is a setting because the server does not take
-/// the frame rate from a single place - the capabilities message and the
-/// control channel's video preference both carry it, and it is worth
-/// being able to change either.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum FrameRate {
-    Fps30 = 30,
-    #[default]
-    Fps60 = 60,
-}
-
-impl FrameRate {
-    pub const ALL: [FrameRate; 2] = [Self::Fps30, Self::Fps60];
-
-    /// Display label, e.g. `"60 fps"`.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Fps30 => "30 fps",
-            Self::Fps60 => "60 fps",
-        }
-    }
-
-    /// The value sent to the server.
-    pub fn fps(self) -> u32 {
-        self as u32
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub locale: Locale,
     /// Advertised to xCloud when a new stream starts; changing it doesn't affect a running stream.
     pub max_bitrate: MaxBitrate,
-    /// Frame rate asked for from the server when a new stream starts.
-    pub frame_rate: FrameRate,
     /// Shows internal stream/session state on the `Streaming` screen. Off by default.
     pub show_stream_debug_info: bool,
     pub game_profiles: HashMap<String, GameProfile>,
@@ -212,7 +177,6 @@ impl Default for Settings {
         Self {
             locale: Locale::default(),
             max_bitrate: MaxBitrate::default(),
-            frame_rate: FrameRate::default(),
             show_stream_debug_info: false,
             game_profiles: HashMap::new(),
         }

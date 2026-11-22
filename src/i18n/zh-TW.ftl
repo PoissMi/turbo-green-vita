@@ -16,7 +16,6 @@ settings-cloud = 雲端
 settings-home = 家用主機
 settings-locale = 語言/地區
 settings-max-bitrate = 最大位元率
-settings-frame-rate = 影格率
 settings-game = 遊戲設定
 settings-swap-shoulders-triggers = 交換 L1/L2 和 R1/R2
 settings-front-touch-auxiliary-buttons = 將前觸控螢幕用於 L2/R2/L3/R3，而非滑鼠

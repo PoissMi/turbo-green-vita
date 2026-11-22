@@ -31,6 +31,15 @@ const DRIFT_RECOVER_MS: i64 = 8;
 const AV_LAG_BACKOFF_MS: i64 = 25;
 /// Below this the video may be climbing back towards the audio.
 const AV_LAG_RECOVER_MS: i64 = 8;
+/// The frame rate we advertise to the server.
+///
+/// The server does not take this from what we ask: the upstream client
+/// asked for 30 fps and was sent 60, and this client asks for 60 and is
+/// sent 60. The number is still advertised - the capabilities message and
+/// the control channel's video preference both carry it, and the SDP's
+/// level has to match it - but it is not a choice any more, so it is not
+/// a setting.
+pub(crate) const REQUESTED_VIDEO_FPS: u32 = 60;
 
 pub(crate) struct RtcSessionConfig {
     pub stun_server: &'static str,

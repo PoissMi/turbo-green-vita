@@ -16,7 +16,6 @@ settings-cloud = Nube
 settings-home = Casa
 settings-locale = Idioma/región
 settings-max-bitrate = Tasa de bits máxima
-settings-frame-rate = Tasa de fotogramas
 settings-game = Configuración del juego
 settings-swap-shoulders-triggers = Intercambiar L1/L2 y R1/R2
 settings-front-touch-auxiliary-buttons = Usar la pantalla táctil frontal para L2/R2/L3/R3 en vez del mouse

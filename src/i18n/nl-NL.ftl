@@ -16,7 +16,6 @@ settings-cloud = Cloud
 settings-home = Thuis
 settings-locale = Taal/regio
 settings-max-bitrate = Maximale bitrate
-settings-frame-rate = Beeldsnelheid
 settings-game = Spelinstellingen
 settings-swap-shoulders-triggers = L1/L2 en R1/R2 wisselen
 settings-front-touch-auxiliary-buttons = Gebruik het voorste touchscreen voor L2/R2/L3/R3 in plaats van de muis

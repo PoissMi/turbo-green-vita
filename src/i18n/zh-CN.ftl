@@ -16,7 +16,6 @@ settings-cloud = 云端
 settings-home = 家用主机
 settings-locale = 语言/区域
 settings-max-bitrate = 最大比特率
-settings-frame-rate = 帧率
 settings-game = 游戏设置
 settings-swap-shoulders-triggers = 交换 L1/L2 和 R1/R2
 settings-front-touch-auxiliary-buttons = 将前触屏用于 L2/R2/L3/R3，而非鼠标

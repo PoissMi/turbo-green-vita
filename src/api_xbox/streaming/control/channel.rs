@@ -130,9 +130,11 @@ pub fn video_keyframe_requested(ifr_requested: bool) -> Value {
 
 /// The video preference the control channel accepts.
 ///
-/// The capabilities message carries `supportsFps`, but the server has been
-/// seen to deliver 60 fps even when a client asks for 30, so the frame
-/// rate is requested a second time here, where the rate is named outright.
+/// The capabilities message carries `supportsFps`, and the rate is named
+/// again here. Neither is a request the server acts on: a client that asks
+/// for 30 fps is still sent 60. The frame rate is one fixed number, so
+/// this exists to keep the messages complete rather than to ask for
+/// anything.
 pub fn video_preference(width: u32, height: u32, fps: u32) -> Value {
     json!({
         "type": "VideoPreference",
