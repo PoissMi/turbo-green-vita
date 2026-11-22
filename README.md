@@ -17,10 +17,6 @@
 </p>
 
 
-> [!NOTE]
-> Local console streaming has not been tested because I do not have a modern
-> Xbox console available for validation.
-
 ## What this fork changes
 
 Turbo GreenVita is a fork of
