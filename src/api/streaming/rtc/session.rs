@@ -138,6 +138,7 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             keyframe_requested = true;
         }
         self.request_keyframe(keyframe_requested, now);
+        self.video.flush_nacks(&mut self.peer);
         if self
             .last_bandwidth_report
             .is_none_or(|previous| now.duration_since(previous) >= BANDWIDTH_REPORT_INTERVAL)
