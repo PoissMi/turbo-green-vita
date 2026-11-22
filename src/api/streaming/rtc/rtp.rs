@@ -45,8 +45,12 @@ pub(super) struct AudioRtp {
 impl AudioRtp {
     pub(super) fn new(sample_rate: u32, payload_type: u8) -> Self {
         Self {
+            // The jitter buffer used to hold 80 ms of audio, which is 80 ms
+            // the sound lags the picture by before the device buffer is even
+            // counted. The video path measures sub-millisecond packet
+            // reordering, so 30 ms is still generous slack.
             samples: SampleBuilder::new(AUDIO_MAX_LATE_PACKETS, OpusPacket, sample_rate)
-                .with_max_time_delay(std::time::Duration::from_millis(80)),
+                .with_max_time_delay(Duration::from_millis(30)),
             payload_type,
         }
     }
