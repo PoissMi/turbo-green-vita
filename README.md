@@ -134,6 +134,53 @@ presented/decoded.
   binary search instead of a `HashSet`, and the assembled AU moves as a
   `Vec<u8>` instead of being copied via `Bytes::to_vec()`.
 
+**Latency and smoothness (0.4.1):**
+
+With the upload fixed, the client stopped being the bottleneck — but two
+problems remained, and both were found by measuring the pipeline instead
+of guessing at it. The HUD now reports the age of the frame on screen
+(`age`, first RTP packet to upload), the input's delay to the wire
+(`in-lag`), the real display flip rate and the worst gap between flips
+(`pres`, `gap`), the audio queue depth (`aud`) and the worst gap between
+data-channel flushes (`flush-gap`).
+
+- **Late frames are repaired, not discarded (0.4.1).** The reassembler
+  dropped the in-flight frame the moment a packet with the next timestamp
+  arrived — but on a busy link the tail of a frame routinely arrives after
+  the head of the next one, so a frame that was merely *late* was treated
+  as *damaged*. The frame was thrown away, its late packets were dropped
+  as stale, and the stream was flagged damaged — which breaks the H.264
+  reference chain and forces a keyframe. A 720p IDR saturates the 5 Mbps
+  link, which causes more loss and more keyframes. The picture froze for
+  roughly a second at a time, which reads as a huge input delay. Frames
+  are now held in a small reorder queue and repaired by their
+  retransmission (NACKed as soon as the gap is detected, not only when the
+  frame is given up on), and a keyframe is requested only when the damage
+  score trips rather than for every damaged frame. The decoder is also no
+  longer stopped on damage: it conceals the missing reference and keeps
+  producing pictures instead of freezing.
+- **Every decoded frame reaches the screen (0.4.1).** The display flips at
+  60 Hz while the source delivers 50–60 frames/s, so there are more display
+  slots than source frames — yet only 37 unique frames/s were shown,
+  because two frames landing between two flips meant the older one was
+  superseded and destroyed. Both handoffs are now bounded queues and the
+  UI takes one frame per display frame, oldest first. A frame that has
+  waited longer than 50 ms is dropped rather than shown, so the queue can
+  never make the picture older than it already was. On device: **unique
+  frames per second 37 → 62**, with the worst-case frame age unchanged
+  (48.2 → 45.6 ms).
+- **Deeper staging ring (0.4.1).** Three NV12 staging slots gave a decoded
+  frame only ~50 ms of validity before the decoder recycled its buffer, and
+  a slow upload meant the frame was thrown away (`slot` in the HUD). Five
+  slots are now allocated when the memory pool allows, degrading to three
+  rather than failing to start.
+- **Audio buffering cut (0.4.1).** The sound was queued ~200 ms deep in
+  the SDL device on top of an 80 ms RTP jitter buffer, so the audio lagged
+  the picture by roughly a third of a second while the video itself was
+  only ~30 ms old — and perceived latency is anchored on the sound. The
+  jitter buffer is now 30 ms, the start buffer 25 ms and the device buffer
+  10.7 ms, cutting total audio buffering from ~180 ms to ~66 ms.
+
 ### Max bitrate setting
 
 A new **Max bitrate** row in Settings advertises a bitrate cap (2, 3, 4, 5, 6,
