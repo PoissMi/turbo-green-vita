@@ -245,6 +245,10 @@ impl VitaSurface {
             metrics.frame_age_max_us.fetch_max(age_us, Ordering::Relaxed);
             metrics.frame_age_sum_us.fetch_add(age_us, Ordering::Relaxed);
             metrics.frame_age_count.fetch_add(1, Ordering::Relaxed);
+            // The age of the frame that is on the screen right now. The
+            // A/V comparison needs this: the picture is this much older by
+            // the time it reaches the glass.
+            crate::streaming::video::metrics::observe_presented_age(age_us);
             if let Some(handed_off_at) = frame.handed_off_at {
                 metrics.handoff_to_upload_max_us.fetch_max(
                     now.duration_since(handed_off_at).as_micros() as u64,

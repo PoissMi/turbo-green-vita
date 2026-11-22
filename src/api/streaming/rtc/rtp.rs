@@ -30,6 +30,10 @@ const HIGH_FPS_DAMAGE_LIMIT: u8 = 3;
 /// Frames kept in the reassembly queue while the head frame waits for its
 /// missing packets.
 const MAX_REORDER_FRAMES: usize = 3;
+/// A keyframe probe only counts when the picture it brought back was
+/// captured this close after the request. Anything older was on its way
+/// already and says nothing about how long a request takes.
+const PROBE_MAX_NEWER_MS: i64 = 250;
 /// How long an incomplete frame may wait for a retransmitted packet before it
 /// is abandoned. A Wi-Fi round trip is 10-40 ms, so 120 ms is generous while
 /// still bounding how stale the pipeline can become.
@@ -331,6 +335,15 @@ impl VideoRtp {
         self.waiting_for_keyframe
     }
 
+    /// The newest video timestamp that was received.
+    ///
+    /// The server's capture point is at this timestamp, so a picture that
+    /// comes back with a much newer one was captured after a request went
+    /// out.
+    pub(super) fn last_video_timestamp(&self) -> Option<u32> {
+        self.last_frame_timestamp
+    }
+
     pub(super) fn wait_for_keyframe(&mut self) {
         self.waiting_for_keyframe = true;
     }
@@ -470,6 +483,12 @@ impl VideoRtp {
         };
         let missing = frame.missing_sequences(None);
         if !missing.is_empty() {
+            // The frame was damaged and the stream was held for it until the
+            // repair window ran out. Every frame behind it waited too, so
+            // this is a freeze the player sees - and one that moves the
+            // picture further behind the sound.
+            let waited_us = frame.first_packet_at.elapsed().as_micros() as u64;
+            crate::streaming::video::metrics::note_repair_wait(waited_us);
             stats.nack_sequence_numbers.extend(missing);
         }
         self.next_sequence = frame.marker_sequence().map(|seq| seq.wrapping_add(1));
@@ -589,6 +608,31 @@ impl VideoRtp {
         self.last_frame_timestamp = Some(completed.timestamp);
 
         let unit = inspect_h264_access_unit(&data);
+        if unit.has_idr {
+            // The picture we asked for has landed: how long did it take?
+            //
+            // The frame age on the HUD starts when a packet leaves the
+            // socket buffer, so it cannot see the delay that is already in
+            // front of the client. This probe can: the moment the request
+            // went out is a moment whose content the client knows.
+            //
+            // A picture the server was going to send anyway says nothing
+            // about how long a request takes, so it only counts when it was
+            // captured after the request went out.
+            if let Some(probe) = crate::streaming::video::metrics::take_keyframe_probe() {
+                let newer_ms = completed.timestamp.wrapping_sub(probe.video_ts) as i64 * 1_000
+                    / i64::from(VIDEO_RTP_CLOCK_RATE);
+                if (0..=PROBE_MAX_NEWER_MS).contains(&newer_ms) {
+                    crate::streaming::video::metrics::record_keyframe_probe(
+                        probe.sent_at,
+                        Instant::now(),
+                        completed.first_packet_at.elapsed(),
+                    );
+                } else {
+                    crate::streaming::video::metrics::note_rejected_probe();
+                }
+            }
+        }
         stats.encoded_resolution = unit.resolution;
         let sample_too_large = unit
             .resolution
