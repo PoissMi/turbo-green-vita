@@ -11,6 +11,7 @@ pub use worker::VideoDecodeWorker;
 use anyhow::{Result, ensure};
 use memory::DecoderBlock;
 use std::sync::{Mutex, atomic::AtomicBool};
+use std::time::Duration;
 
 #[derive(Clone, Copy)]
 pub(crate) struct YuvLayout {
@@ -37,6 +38,16 @@ impl YuvLayout {
 const STAGING_SLOT_TARGET: usize = 5;
 /// Never go below this, even if the memory pool is tight.
 const STAGING_SLOT_MIN: usize = 3;
+
+/// How old a decoded frame may get before it is dropped instead of shown.
+///
+/// Frames are displayed oldest-first so that a frame which arrived between
+/// two display frames still reaches the screen instead of being superseded.
+/// That queue must never make the picture older than it would have been
+/// otherwise, so anything older than this limit is dropped. It is set to the
+/// worst age the display path already shows, which makes the queue a pure
+/// gain: it recovers frames without moving the frame age.
+pub(crate) const FRESH_FRAME_LIMIT: Duration = Duration::from_millis(50);
 
 static IDLE_OUTPUT_SLOTS: Mutex<Option<Vec<DecoderBlock>>> = Mutex::new(None);
 

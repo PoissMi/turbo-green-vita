@@ -20,6 +20,8 @@ const GAMEPAD_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_PENDING_COMMANDS: usize = 16;
 const MAX_PENDING_EVENTS: usize = 32;
 const MAX_PENDING_AUDIO_BATCHES: usize = 16;
+/// Decoded frames waiting for the UI to display them, one per display frame.
+const UI_FRAME_QUEUE_DEPTH: usize = 4;
 const SDP_NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub(crate) trait RtcWorkerProvider: Send + 'static {
@@ -55,7 +57,7 @@ pub struct RtcWorker {
     commands_tx: SyncSender<RtcWorkerCommand>,
     pub(crate) events_rx: Receiver<RtcWorkerEvent>,
     pub(crate) audio_rx: Receiver<Vec<Bytes>>,
-    pub(crate) latest_frame: Arc<Mutex<Option<(u64, DecodedFrame)>>>,
+    pub(crate) latest_frames: Arc<Mutex<VecDeque<(u64, DecodedFrame)>>>,
     pub(crate) frame_ready: Arc<tokio::sync::Notify>,
     latest_gamepad: Arc<Mutex<Option<SampledGamepadFrame>>>,
     gamepad_pulses: Arc<Mutex<VecDeque<GamepadFrame>>>,
@@ -67,8 +69,8 @@ impl RtcWorker {
         let (commands_tx, commands_rx) = sync_channel(MAX_PENDING_COMMANDS);
         let (events_tx, events_rx) = sync_channel(MAX_PENDING_EVENTS);
         let (audio_tx, audio_rx) = sync_channel(MAX_PENDING_AUDIO_BATCHES);
-        let latest_frame = Arc::new(Mutex::new(None));
-        let worker_latest_frame = Arc::clone(&latest_frame);
+        let latest_frames = Arc::new(Mutex::new(VecDeque::new()));
+        let worker_latest_frames = Arc::clone(&latest_frames);
         let frame_ready = Arc::new(tokio::sync::Notify::new());
         let worker_frame_ready = Arc::clone(&frame_ready);
         let latest_gamepad = Arc::new(Mutex::new(None));
@@ -88,7 +90,7 @@ impl RtcWorker {
                         commands_rx,
                         events_tx.clone(),
                         audio_tx,
-                        worker_latest_frame,
+                        worker_latest_frames,
                         worker_frame_ready,
                         worker_latest_gamepad,
                         worker_gamepad_pulses,
@@ -116,7 +118,7 @@ impl RtcWorker {
             commands_tx,
             events_rx,
             audio_rx,
-            latest_frame,
+            latest_frames,
             frame_ready,
             latest_gamepad,
             gamepad_pulses,
@@ -162,7 +164,7 @@ fn run_worker_thread<P: RtcWorkerProvider>(
     commands_rx: Receiver<RtcWorkerCommand>,
     events_tx: SyncSender<RtcWorkerEvent>,
     audio_tx: SyncSender<Vec<Bytes>>,
-    latest_frame: Arc<Mutex<Option<(u64, DecodedFrame)>>>,
+    latest_frames: Arc<Mutex<VecDeque<(u64, DecodedFrame)>>>,
     frame_ready: Arc<tokio::sync::Notify>,
     latest_gamepad: Arc<Mutex<Option<SampledGamepadFrame>>>,
     gamepad_pulses: Arc<Mutex<VecDeque<GamepadFrame>>>,
@@ -199,7 +201,7 @@ fn run_worker_thread<P: RtcWorkerProvider>(
             commands_rx,
             events_tx,
             audio_tx,
-            latest_frame,
+            latest_frames,
             frame_ready,
             latest_gamepad,
             gamepad_pulses,
@@ -236,7 +238,7 @@ async fn run_session<B: super::session::RtcSessionBackend>(
     commands_rx: Receiver<RtcWorkerCommand>,
     events_tx: SyncSender<RtcWorkerEvent>,
     audio_tx: SyncSender<Vec<Bytes>>,
-    latest_frame: Arc<Mutex<Option<(u64, DecodedFrame)>>>,
+    latest_frames: Arc<Mutex<VecDeque<(u64, DecodedFrame)>>>,
     frame_ready: Arc<tokio::sync::Notify>,
     latest_gamepad: Arc<Mutex<Option<SampledGamepadFrame>>>,
     gamepad_pulses: Arc<Mutex<VecDeque<GamepadFrame>>>,
@@ -330,23 +332,32 @@ async fn run_session<B: super::session::RtcSessionBackend>(
             send_lossy(&audio_tx, audio_packets);
         }
 
-        if let Some((id, mut frame)) = session.video.latest_frame.take()
-            && let Ok(mut latest) = latest_frame.lock()
-        {
-            use crate::streaming::video::metrics::METRICS;
-            use std::sync::atomic::Ordering::Relaxed;
+        // Hand every decoded frame to the UI, oldest first. The display
+        // flips faster than the source produces frames, so the UI can show
+        // one per flip instead of only the newest of each burst.
+        let mut drained = VecDeque::new();
+        std::mem::swap(&mut session.video.latest_frames, &mut drained);
+        if !drained.is_empty() {
+            if let Ok(mut latest) = latest_frames.lock() {
+                use crate::streaming::video::metrics::METRICS;
+                use std::sync::atomic::Ordering::Relaxed;
 
-            let now = Instant::now();
-            METRICS.decode_to_handoff_max_us.fetch_max(
-                now.duration_since(frame.decoded_at).as_micros() as u64,
-                Relaxed,
-            );
-            frame.handed_off_at = Some(now);
-            if latest.replace((id, frame)).is_some() {
-                METRICS.ui_overwrites.fetch_add(1, Relaxed);
+                for (id, mut frame) in drained {
+                    let now = Instant::now();
+                    METRICS.decode_to_handoff_max_us.fetch_max(
+                        now.duration_since(frame.decoded_at).as_micros() as u64,
+                        Relaxed,
+                    );
+                    frame.handed_off_at = Some(now);
+                    latest.push_back((id, frame));
+                    METRICS.handoffs.fetch_add(1, Relaxed);
+                    while latest.len() > UI_FRAME_QUEUE_DEPTH {
+                        latest.pop_front();
+                        METRICS.ui_overwrites.fetch_add(1, Relaxed);
+                    }
+                }
+                frame_ready.notify_one();
             }
-            METRICS.handoffs.fetch_add(1, Relaxed);
-            frame_ready.notify_one();
         }
 
         if session.status != last_status || session.connection_state != last_connection_state {

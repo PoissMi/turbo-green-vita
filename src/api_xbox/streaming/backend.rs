@@ -68,7 +68,21 @@ impl XboxStreamingBackend {
     }
 
     pub(crate) fn take_latest_frame(&self) -> Option<(u64, DecodedFrame)> {
-        self.worker.latest_frame.lock().ok()?.take()
+        let mut queue = self.worker.latest_frames.lock().ok()?;
+        // Take the oldest frame that is still fresh enough to show. Frames
+        // that have been waiting too long are dropped instead of displayed:
+        // a backlog must never make the picture older than the limit, which
+        // is the worst age this path already showed before the queue existed.
+        while let Some((id, decoded_at)) = queue.front().map(|(id, frame)| (*id, frame.decoded_at)) {
+            if decoded_at.elapsed() <= crate::streaming::video::FRESH_FRAME_LIMIT {
+                return queue.pop_front();
+            }
+            queue.pop_front();
+            crate::streaming::video::metrics::METRICS
+                .ui_overwrites
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        None
     }
 
     pub(crate) fn direct_video_output(&self) -> Arc<DirectVideoOutput> {

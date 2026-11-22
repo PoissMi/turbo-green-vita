@@ -6,10 +6,13 @@ use rtc::media_stream::MediaStreamTrackId;
 use rtc::peer_connection::RTCPeerConnection;
 use rtc::rtp::Packet;
 use rtc::rtp_transceiver::RTCRtpReceiverId;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const STREAM_STATS_INTERVAL: Duration = Duration::from_secs(1);
+/// Decoded frames kept for the UI to display, one per display frame.
+const DECODED_QUEUE_DEPTH: usize = 4;
 
 #[derive(Default)]
 struct VideoStats {
@@ -27,7 +30,13 @@ pub(crate) struct VideoReceiver {
     ssrc: Option<u32>,
     rtp: rtp::VideoRtp,
     pub(crate) decoder: VideoDecodeWorker,
-    pub(crate) latest_frame: Option<(u64, DecodedFrame)>,
+    /// Decoded frames waiting to be handed to the UI, oldest first.
+    ///
+    /// This used to hold a single frame and keep only the newest one, which
+    /// threw away every frame that arrived between two display frames. The
+    /// display flips faster than the source produces frames, so there is room
+    /// to show them all - the UI takes them one per display frame.
+    pub(crate) latest_frames: VecDeque<(u64, DecodedFrame)>,
     next_frame_id: u64,
     pub(crate) received_packet: bool,
     last_stats_report: Instant,
@@ -47,7 +56,7 @@ impl VideoReceiver {
             ssrc: None,
             rtp: rtp::VideoRtp::new(config.decode_width, config.decode_height),
             decoder: VideoDecodeWorker::spawn(config, Arc::clone(&direct_output))?,
-            latest_frame: None,
+            latest_frames: VecDeque::new(),
             next_frame_id: 0,
             received_packet: false,
             last_stats_report: Instant::now(),
@@ -98,26 +107,24 @@ impl VideoReceiver {
 
     pub(crate) fn drain_decoder(&mut self, keyframe_requested: &mut bool) {
         let mut decode_errors = 0u64;
-        // Drain the full queue each pump so a burst doesn't strand frames:
-        // take every result but only the newest becomes `latest_frame`.
-        // Frames that are older than the newest are still counted as
-        // replaced, but they were at least offered to the loop first —
-        // the loop's `latest_frame.take()` never sees a stale overwrite
-        // from *this* drain because the worker latch is checked immediately
-        // after pump() returns.
+        // Drain the full queue each pump so a burst doesn't strand frames.
         let drained: Vec<_> = self
             .decoder
             .latest_result
             .lock()
             .map(|mut queue| queue.drain(..).collect())
             .unwrap_or_default();
-        // Keep only the last OK frame (newest); count the rest as replaced.
-        let mut latest_ok = None;
+        // Keep every decoded frame, oldest first. The display flips faster
+        // than the source produces frames, so frames that arrive between two
+        // display frames still have a slot to be shown in. Only a full queue
+        // drops anything, and it drops the oldest.
         for result in drained {
             match result {
                 Ok(frame) => {
                     self.next_frame_id = self.next_frame_id.wrapping_add(1);
-                    if latest_ok.replace((self.next_frame_id, frame)).is_some() {
+                    self.latest_frames.push_back((self.next_frame_id, frame));
+                    while self.latest_frames.len() > DECODED_QUEUE_DEPTH {
+                        self.latest_frames.pop_front();
                         crate::streaming::video::metrics::METRICS
                             .replaced
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -129,9 +136,6 @@ impl VideoReceiver {
                     *keyframe_requested = true;
                 }
             }
-        }
-        if let Some(frame) = latest_ok {
-            self.latest_frame = Some(frame);
         }
 
         if decode_errors > 0 {
