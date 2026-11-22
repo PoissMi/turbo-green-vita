@@ -26,6 +26,16 @@ const MIN_BANDWIDTH_ESTIMATE_KBPS: u32 = 1500;
 const DRIFT_BACKOFF_MS: i64 = 25;
 /// Below this the path is keeping up, so the estimate may climb again.
 const DRIFT_RECOVER_MS: i64 = 8;
+/// The video falling this far behind the audio over a minute means the
+/// server's encoder is not keeping up with the rate we ask for.
+const AV_LAG_BACKOFF_MS: i64 = 25;
+/// A video that is this far behind the audio is stale even if it is not
+/// getting worse.
+const AV_LAG_HIGH_MS: i64 = 200;
+/// Below this the video and the audio are in step.
+const AV_LAG_OK_MS: i64 = 100;
+/// Below this the video may be climbing back towards the audio.
+const AV_LAG_RECOVER_MS: i64 = 8;
 
 pub(crate) struct RtcSessionConfig {
     pub stun_server: &'static str,
@@ -198,13 +208,30 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             .server_drift_us
             .load(std::sync::atomic::Ordering::Relaxed)
             / 1000;
+        // How far the video has fallen behind the audio. The audio is mixed
+        // from the game clock and the video from the same clock, so the two
+        // drifting apart means the video is being delivered from an older
+        // point in the game - the encoder cannot keep up.
+        let av_lag_ms = crate::streaming::video::metrics::METRICS
+            .av_lag_us
+            .load(std::sync::atomic::Ordering::Relaxed)
+            / 1000;
+        let av_drift_ms = crate::streaming::video::metrics::METRICS
+            .av_lag_drift_us
+            .load(std::sync::atomic::Ordering::Relaxed)
+            / 1000;
         let current = self
             .bandwidth_estimate_kbps
             .max(MIN_BANDWIDTH_ESTIMATE_KBPS);
-        let next = if drift_ms > DRIFT_BACKOFF_MS {
+        let struggling = drift_ms > DRIFT_BACKOFF_MS
+            || av_drift_ms > AV_LAG_BACKOFF_MS
+            || av_lag_ms > AV_LAG_HIGH_MS;
+        let healthy =
+            drift_ms < DRIFT_RECOVER_MS && av_drift_ms < AV_LAG_RECOVER_MS && av_lag_ms < AV_LAG_OK_MS;
+        let next = if struggling {
             // The queue is growing: ask for noticeably less than we get.
             (current * 85 / 100).max(MIN_BANDWIDTH_ESTIMATE_KBPS)
-        } else if drift_ms < DRIFT_RECOVER_MS {
+        } else if healthy {
             // The path is keeping up: climb back towards the ceiling.
             current
                 .saturating_add(ceiling.saturating_sub(current) / 8)

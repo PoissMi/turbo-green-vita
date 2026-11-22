@@ -40,6 +40,9 @@ pub(super) struct VideoSampleStats {
 pub(super) struct AudioRtp {
     samples: SampleBuilder<OpusPacket>,
     payload_type: u8,
+    /// The RTP clock rate of the audio stream, used to turn its timestamps
+    /// into game time.
+    sample_rate: u32,
 }
 
 impl AudioRtp {
@@ -52,6 +55,7 @@ impl AudioRtp {
             samples: SampleBuilder::new(AUDIO_MAX_LATE_PACKETS, OpusPacket, sample_rate)
                 .with_max_time_delay(Duration::from_millis(30)),
             payload_type,
+            sample_rate,
         }
     }
 
@@ -59,6 +63,13 @@ impl AudioRtp {
         if packet.header.payload_type != self.payload_type {
             return;
         }
+
+        // The audio packet's game tick. The audio is mixed straight from the
+        // game clock, so it is the reference the video is compared against.
+        crate::streaming::video::metrics::observe_audio_tick(
+            packet.header.timestamp as f64 / f64::from(self.sample_rate),
+            Instant::now(),
+        );
 
         self.samples.push(packet);
         while audio_packets.len() < MAX_PENDING_AUDIO_PACKETS {
@@ -489,6 +500,12 @@ impl VideoRtp {
         let assembly_us = completed.first_packet_at.elapsed().as_micros() as u64;
         // How late this frame is compared to the server's own timeline.
         self.record_timeline(completed.timestamp, completed.first_packet_at);
+        // The frame's game tick, compared with the audio's to show how far the
+        // video has fallen behind the sound.
+        crate::streaming::video::metrics::observe_video_tick(
+            completed.timestamp as f64 / f64::from(VIDEO_RTP_CLOCK_RATE),
+            completed.first_packet_at,
+        );
         crate::streaming::video::metrics::METRICS
             .rtp_assembly_sum_us
             .fetch_add(assembly_us, Ordering::Relaxed);

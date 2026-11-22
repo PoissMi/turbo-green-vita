@@ -1,6 +1,7 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub(crate) struct VideoMetrics {
     pub(crate) rtp_assembly_sum_us: AtomicU64,
@@ -84,6 +85,96 @@ pub(crate) struct VideoMetrics {
     pub(crate) input_wire_count: AtomicU64,
     /// Input reports handed to the data channel.
     pub(crate) input_sent: AtomicU64,
+    /// How far the video's game tick has fallen behind the audio's, in
+    /// microseconds. The audio is mixed from the game clock and the video is
+    /// captured from it, so comparing the two streams at the same moment on
+    /// our clock shows the video arriving from an older point in the game.
+    pub(crate) av_lag_us: AtomicI64,
+    /// How much that grew over the last minute.
+    pub(crate) av_lag_drift_us: AtomicI64,
+    /// Pairs of contemporaneous video and audio packets compared so far.
+    pub(crate) av_pairs: AtomicU64,
+}
+
+/// The latest tick of each stream, and the history used to measure how far
+/// the video falls behind the audio.
+struct AvSync {
+    video: Option<(f64, Instant)>,
+    audio: Option<(f64, Instant)>,
+    /// The tick difference at the start of the session. The two streams have
+    /// their own timestamp origins, so only a change from this point is
+    /// meaningful.
+    baseline: Option<f64>,
+    samples: VecDeque<(Instant, f64)>,
+}
+
+static AV_SYNC: Mutex<AvSync> = Mutex::new(AvSync {
+    video: None,
+    audio: None,
+    baseline: None,
+    samples: VecDeque::new(),
+});
+
+/// Records the game tick of a video frame and compares it with the audio.
+pub(crate) fn observe_video_tick(timestamp_seconds: f64, arrived_at: Instant) {
+    let mut sync = match AV_SYNC.lock() {
+        Ok(sync) => sync,
+        Err(_) => return,
+    };
+    sync.video = Some((timestamp_seconds, arrived_at));
+    update_av_lag(&mut sync);
+}
+
+/// Records the game tick of an audio packet.
+pub(crate) fn observe_audio_tick(timestamp_seconds: f64, arrived_at: Instant) {
+    let mut sync = match AV_SYNC.lock() {
+        Ok(sync) => sync,
+        Err(_) => return,
+    };
+    sync.audio = Some((timestamp_seconds, arrived_at));
+}
+
+fn update_av_lag(sync: &mut AvSync) {
+    let (Some((video_ts, video_at)), Some((audio_ts, audio_at))) = (sync.video, sync.audio) else {
+        return;
+    };
+    // The two samples have to be contemporaneous: the video frame and the
+    // audio packet that reached us at the same moment were produced by the
+    // same game tick.
+    if video_at.duration_since(audio_at) > Duration::from_millis(120) {
+        return;
+    }
+    let skew = video_ts - audio_ts;
+    let Some(baseline) = sync.baseline else {
+        sync.baseline = Some(skew);
+        return;
+    };
+    // A video that arrives from an older point in the game has a smaller
+    // tick than the audio that arrived beside it.
+    METRICS.av_lag_us.store(((baseline - skew) * 1_000_000.0) as i64, Ordering::Relaxed);
+    METRICS.av_pairs.fetch_add(1, Ordering::Relaxed);
+
+    let due = sync
+        .samples
+        .back()
+        .is_none_or(|(last_at, _)| video_at.duration_since(*last_at) >= Duration::from_secs(1));
+    if !due {
+        return;
+    }
+    sync.samples.push_back((video_at, skew));
+    while sync.samples.len() > 130 {
+        sync.samples.pop_front();
+    }
+    // How much the lag grew over the last minute.
+    if let Some((_, old_skew)) = sync
+        .samples
+        .iter()
+        .find(|(at, _)| video_at.duration_since(*at) >= Duration::from_secs(58))
+    {
+        METRICS
+            .av_lag_drift_us
+            .store(((old_skew - skew) * 1_000_000.0) as i64, Ordering::Relaxed);
+    }
 }
 
 /// Records that an input report was queued for the data channel.
@@ -151,6 +242,9 @@ pub(crate) static METRICS: VideoMetrics = VideoMetrics {
     input_wire_max_us: AtomicU64::new(0),
     input_wire_count: AtomicU64::new(0),
     input_sent: AtomicU64::new(0),
+    av_lag_us: AtomicI64::new(0),
+    av_lag_drift_us: AtomicI64::new(0),
+    av_pairs: AtomicU64::new(0),
 };
 
 pub fn video_performance_summary() -> String {
@@ -191,7 +285,7 @@ pub fn video_performance_summary() -> String {
         .checked_div(METRICS.input_wire_count.swap(0, Ordering::Relaxed))
         .unwrap_or(0);
     format!(
-        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us\nsrv:{server_offset_ms}ms drift:{server_drift_ms}ms remb:{}kbps rx-b:{}/{} in-wire:{}/{}us in-rate:{}",
+        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us\nsrv:{server_offset_ms}ms drift:{server_drift_ms}ms remb:{}kbps rx-b:{}/{} in-wire:{}/{}us in-rate:{} av-lag:{}ms av-drift:{}ms",
         METRICS.decoded.swap(0, Ordering::Relaxed),
         METRICS.presented.swap(0, Ordering::Relaxed),
         METRICS.decode_us.load(Ordering::Relaxed),
@@ -224,5 +318,7 @@ pub fn video_performance_summary() -> String {
         input_wire_average,
         METRICS.input_wire_max_us.swap(0, Ordering::Relaxed),
         METRICS.input_sent.swap(0, Ordering::Relaxed),
+        METRICS.av_lag_us.load(Ordering::Relaxed) / 1000,
+        METRICS.av_lag_drift_us.load(Ordering::Relaxed) / 1000,
     )
 }
