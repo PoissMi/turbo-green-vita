@@ -145,6 +145,18 @@ fn pin_decoder_thread() {
     if result < 0 {
         eprintln!("Failed to pin video decoder thread to user CPU 2: {result:#x}");
     }
+    // Decode is the latency-critical producer: raise it above the UI/egui
+    // thread (which has no priority bump) so 5.7ms decodes don't queue
+    // behind tessellation. The RTC thread stays TIME_CRITICAL on CPU 1 —
+    // decode (CPU 2) now outranks the loop but doesn't preempt the socket.
+    let result = unsafe {
+        sdl2::sys::SDL_SetThreadPriority(
+            sdl2::sys::SDL_ThreadPriority::SDL_THREAD_PRIORITY_HIGH,
+        )
+    };
+    if result < 0 {
+        eprintln!("Failed to raise video decoder thread priority: {result}");
+    }
 }
 
 fn run_decode_loop(
