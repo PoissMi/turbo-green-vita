@@ -17,6 +17,14 @@ const MAX_PENDING_AUDIO_PACKETS: usize = 32;
 const MAX_H264_ACCESS_UNIT_BYTES: usize = 2 * 1024 * 1024;
 const VIDEO_RTP_CLOCK_RATE: u32 = 90_000;
 const AUDIO_MAX_LATE_PACKETS: u16 = 32;
+/// How long the jitter buffer waits for a late audio packet before it gives
+/// up on it.
+///
+/// The buffer only holds audio that has arrived but cannot be played yet,
+/// so a longer deadline costs a little latency in the bad case and saves
+/// the audio - and with it the A/V sync - in the case where a packet is
+/// merely late.
+const AUDIO_JITTER_DEADLINE_MS: u64 = 120;
 const LOW_FPS_DAMAGE_LIMIT: u8 = 8;
 const HIGH_FPS_DAMAGE_LIMIT: u8 = 3;
 /// Frames kept in the reassembly queue while the head frame waits for its
@@ -43,19 +51,37 @@ pub(super) struct AudioRtp {
     /// The RTP clock rate of the audio stream, used to turn its timestamps
     /// into game time.
     sample_rate: u32,
+    /// Packets handed to the jitter buffer, and samples taken out of it.
+    /// The difference is the audio still waiting there.
+    pushed: u64,
+    popped: u64,
+    /// The first and newest RTP timestamp, used to work out how long one
+    /// audio packet lasts.
+    first_timestamp: Option<u32>,
+    newest_timestamp: Option<u32>,
 }
 
 impl AudioRtp {
     pub(super) fn new(sample_rate: u32, payload_type: u8) -> Self {
         Self {
-            // The jitter buffer used to hold 80 ms of audio, which is 80 ms
+            // The jitter buffer used to hold 30 ms of audio, which is 30 ms
             // the sound lags the picture by before the device buffer is even
             // counted. The video path measures sub-millisecond packet
             // reordering, so 30 ms is still generous slack.
+            //
+            // It is also the point where late audio is thrown away: the
+            // buffer drops what it cannot assemble in time, and a hole in
+            // the audio timeline is a hole in the sound - the picture then
+            // looks late even though it is not. So the buffer is given
+            // room to wait for a late packet instead of dropping it.
             samples: SampleBuilder::new(AUDIO_MAX_LATE_PACKETS, OpusPacket, sample_rate)
-                .with_max_time_delay(Duration::from_millis(30)),
+                .with_max_time_delay(Duration::from_millis(AUDIO_JITTER_DEADLINE_MS)),
             payload_type,
             sample_rate,
+            pushed: 0,
+            popped: 0,
+            first_timestamp: None,
+            newest_timestamp: None,
         }
     }
 
@@ -67,17 +93,49 @@ impl AudioRtp {
         // The audio packet's game tick. The audio is mixed straight from the
         // game clock, so it is the reference the video is compared against.
         crate::streaming::video::metrics::observe_audio_tick(
-            packet.header.timestamp as f64 / f64::from(self.sample_rate),
+            packet.header.timestamp,
+            self.sample_rate,
             Instant::now(),
         );
 
+        self.pushed += 1;
+        let first = *self.first_timestamp.get_or_insert(packet.header.timestamp);
+        self.newest_timestamp = Some(packet.header.timestamp);
         self.samples.push(packet);
         while audio_packets.len() < MAX_PENDING_AUDIO_PACKETS {
             let Some(sample) = self.samples.pop() else {
                 break;
             };
+            self.popped += 1;
             audio_packets.push(sample.data);
         }
+        self.report_jitter_depth(first);
+    }
+
+    /// How much audio is still waiting in the jitter buffer.
+    ///
+    /// This audio has arrived but has not been decoded yet. It is not lost,
+    /// and it is not heard either, so it has to be taken out of the count
+    /// of missing audio - otherwise a busy moment reads as a hole in the
+    /// sound.
+    fn report_jitter_depth(&self, first_timestamp: u32) {
+        let Some(newest) = self.newest_timestamp else {
+            return;
+        };
+        let held = self.pushed.saturating_sub(self.popped);
+        if held == 0 || self.pushed < 2 {
+            crate::streaming::video::metrics::METRICS
+                .audio_jitter_samples
+                .store(0, Ordering::Relaxed);
+            return;
+        }
+        // How long one audio packet lasts, in RTP samples.
+        let packet_samples = u64::from(newest.wrapping_sub(first_timestamp))
+            / (self.pushed.saturating_sub(1))
+            .max(1);
+        crate::streaming::video::metrics::METRICS
+            .audio_jitter_samples
+            .store(held * packet_samples, Ordering::Relaxed);
     }
 }
 
@@ -503,7 +561,8 @@ impl VideoRtp {
         // The frame's game tick, compared with the audio's to show how far the
         // video has fallen behind the sound.
         crate::streaming::video::metrics::observe_video_tick(
-            completed.timestamp as f64 / f64::from(VIDEO_RTP_CLOCK_RATE),
+            completed.timestamp,
+            VIDEO_RTP_CLOCK_RATE,
             completed.first_packet_at,
         );
         crate::streaming::video::metrics::METRICS

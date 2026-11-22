@@ -1,5 +1,5 @@
 use crate::Stream;
-use crate::api::streaming::rtc::session::{RtcSessionConfig, effective_bitrate_kbps};
+use crate::api::streaming::rtc::session::RtcSessionConfig;
 use crate::api::streaming::rtc::worker::{RtcWorker, RtcWorkerProvider};
 use crate::api_xbox::streaming::rtc::protocol::XboxRtcProtocol;
 use crate::api_xbox::streaming::rtc::{AUDIO_PAYLOAD_TYPE, ROUTE_PROBE, STUN_SERVER, peer};
@@ -45,10 +45,7 @@ impl RtcWorkerProvider for XboxRtcWorkerProvider {
     }
 
     async fn exchange_sdp(&self, offer: &RTCSessionDescription) -> Result<String> {
-        let sdp = set_max_video_bitrate(
-            &offer.sdp,
-            effective_bitrate_kbps(self.max_bitrate_kbps),
-        );
+        let sdp = set_max_video_bitrate(&offer.sdp, self.max_bitrate_kbps);
         let answer = self.stream.send_sdp_offer(&sdp).await?;
         Ok(normalize_answer_ice_credentials(&answer))
     }

@@ -4,7 +4,6 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::api::streaming::rtc::peer::RtcDataChannelConfig;
-use crate::api::streaming::rtc::session::effective_bitrate_kbps;
 use crate::api_xbox::streaming::rtc::protocol::ChannelIds;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -170,10 +169,6 @@ pub fn startup_messages(
     height: u32,
     video_fps: u32,
 ) -> Vec<Value> {
-    // The server sizes its encoder from what we advertise, so the proactive
-    // cap applies here as well: asking for more than the server can encode
-    // in real time buys a queue, not a sharper picture.
-    let max_bitrate_kbps = effective_bitrate_kbps(max_bitrate_kbps);
     vec![
         generate_message(
             "/streaming/systemUi/configuration",
