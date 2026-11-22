@@ -24,9 +24,6 @@ pub(crate) enum AppState {
         job: JoinHandle<Result<MsalAuth>>,
     },
     LoadingCredentials(JoinHandle<Result<CredentialsLoadResult>>),
-    ModeSelect {
-        selected: usize,
-    },
     LoadingTitles(JoinHandle<Result<Vec<Game>>>),
     TitleList {
         selected: usize,
@@ -131,7 +128,6 @@ impl App {
             }
             AppState::TitleList { .. } => self.pump_title_details().await?,
             AppState::LanguageSelect { .. }
-            | AppState::ModeSelect { .. }
             | AppState::ConsoleList { .. }
             | AppState::Settings { .. }
             | AppState::Error { .. } => {}
