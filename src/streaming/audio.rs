@@ -11,10 +11,50 @@ const AUDIO_CHANNELS: usize = 2;
 const AUDIO_BYTES_PER_SECOND: u32 = AUDIO_SAMPLE_RATE as u32 * AUDIO_CHANNELS as u32 * 2;
 /// Hard cap on the audio queued in the device.
 ///
-/// The queue depth *is* the A/V desync: whatever sits in here is audio the
-/// player has already heard the video for. It used to be 240 ms, which is
-/// how the sound ended up almost a third of a second behind the picture.
-const MAX_QUEUED_AUDIO_BYTES: u32 = AUDIO_BYTES_PER_SECOND * 120 / 1_000;
+/// Whatever sits in here is audio the player has not heard yet but will:
+/// the queue depth is the client's own share of the audio's latency.
+///
+/// It was 120 ms, and together with the jitter buffer in front of it the
+/// client held 230 ms of sound before a single sample reached the
+/// speaker. The picture reaches the screen 17 ms after it arrives, so the
+/// sound was a fifth of a second older than the picture it belongs to -
+/// and the player heard the sound of an action long after they saw it.
+///
+/// 50 ms is enough to absorb the 15 ms pump interval and the 20 ms Opus
+/// frame the decoder hands over, without being a buffer the player can
+/// hear.
+const MAX_QUEUED_AUDIO_BYTES: u32 = AUDIO_BYTES_PER_SECOND * 50 / 1_000;
+/// The delay the client aims for.
+///
+/// Everything between the socket and the speaker is latency the player
+/// feels. The sound arrives later than the picture, so the player sees
+/// the action and hears it a quarter of a second later - and the longer
+/// the client holds that audio, the further the sound falls behind the
+/// picture and the more the picture looks late.
+///
+/// The client used to hold every millisecond it was given and never give
+/// any of it back: 240 ms of audio sat in the device queue and the
+/// decoder's output while the picture was 34 ms old. Nothing ever threw
+/// the old audio away, so the gap was there for the whole session.
+///
+/// When the audio in the system is older than this, the oldest of it is
+/// dropped. The sound then skips ahead to meet the picture instead of
+/// trailing it, and the client stops adding latency of its own. The
+/// price is a short gap in the sound, once, shortly after the stream
+/// starts - a far better trade than a quarter of a second of permanent
+/// lag.
+///
+/// It cannot go much below this: the jitter buffer alone holds 40 ms of
+/// audio and the client hands it to the device every 15 ms. A target
+/// that the pipeline cannot reach would make the client trim on every
+/// pass, and the sound would skip forward forever.
+const AUDIO_MAX_DELAY_MS: u64 = 120;
+/// The delay above which the client starts giving audio back.
+///
+/// The gap between this and the target is the dead band: the client does
+/// not trim for a jitter buffer that swells and shrinks by a few
+/// milliseconds, only when it is really hoarding.
+const AUDIO_TRIM_ABOVE_MS: u64 = 200;
 /// How much audio to buffer before starting playback.
 ///
 /// This used to be 80 ms, which put the sound roughly a third of a second
@@ -209,6 +249,15 @@ impl AudioRenderer {
             }
         }
 
+        // Nothing may sit in the client's audio pipeline for longer than
+        // the target. This is the one place where the client gives audio
+        // back, and it is what keeps the sound from falling further and
+        // further behind the picture over a long session. It runs before
+        // the device is filled, so the queue is emptied and refilled with
+        // the newest audio in the same pass - the old audio is missing,
+        // but the sound does not stall.
+        self.trim_to_target();
+
         // Feed the device while it has room.
         while let Some(samples) = self.pending_pcm.pop_front() {
             let sample_bytes = (samples.len() * size_of::<i16>()) as u32;
@@ -265,6 +314,60 @@ impl AudioRenderer {
                 .audio_pipeline_samples
                 .store(decoded.saturating_sub(played), ordering);
         }
+    }
+
+    /// Gives the oldest audio back until the client's own delay is back
+    /// inside the target.
+    ///
+    /// The decoded audio that has not been handed to the device yet is
+    /// the oldest of it that can be dropped without stalling the sound,
+    /// so that is where the trim starts. Only when the pipeline is empty
+    /// and the delay is still too large is the device queue emptied as
+    /// well - and only when emptying it would actually bring the client
+    /// inside the target, because emptying it while the pipeline is
+    /// bigger than the target would make the sound stumble for nothing.
+    ///
+    /// The gap this leaves in the sound is the price. It is a hole in the
+    /// audio timeline, so the sound after it plays early - but the whole
+    /// client stops adding a quarter of a second of its own latency,
+    /// which is the larger prize.
+    fn trim_to_target(&mut self) {
+        use crate::streaming::video::metrics::{METRICS, client_audio_delay_samples};
+        let target = AUDIO_MAX_DELAY_MS * 48;
+        if client_audio_delay_samples() <= AUDIO_TRIM_ABOVE_MS * 48 {
+            return;
+        }
+        while client_audio_delay_samples() > target {
+            let Some(samples) = self.pending_pcm.pop_front() else {
+                break;
+            };
+            let dropped = (samples.len() / AUDIO_CHANNELS) as u64;
+            METRICS
+                .audio_trimmed_samples
+                .fetch_add(dropped, std::sync::atomic::Ordering::Relaxed);
+        }
+        let delay = client_audio_delay_samples();
+        if delay <= target {
+            return;
+        }
+        let queued_samples =
+            (self.queue.size() / size_of::<i16>() as u32 / AUDIO_CHANNELS as u32) as u64;
+        if queued_samples == 0 {
+            return;
+        }
+        // What is left in the pipeline on its own. If that is already
+        // more than the target, emptying the device queue would not help.
+        if delay.saturating_sub(queued_samples) > target {
+            return;
+        }
+        self.queue.clear();
+        self.started = false;
+        METRICS
+            .audio_cleared_samples
+            .fetch_add(queued_samples, std::sync::atomic::Ordering::Relaxed);
+        METRICS
+            .audio_resyncs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn restart_decode_worker(&mut self) {

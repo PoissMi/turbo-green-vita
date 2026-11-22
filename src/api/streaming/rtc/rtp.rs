@@ -24,7 +24,17 @@ const AUDIO_MAX_LATE_PACKETS: u16 = 32;
 /// so a longer deadline costs a little latency in the bad case and saves
 /// the audio - and with it the A/V sync - in the case where a packet is
 /// merely late.
-const AUDIO_JITTER_DEADLINE_MS: u64 = 120;
+///
+/// It was 120 ms, and with the device queue on top of it the client held
+/// 230 ms of sound before a single sample reached the speaker - ten times
+/// the age of the picture it was playing against. The picture arrives 17 ms
+/// old; the sound arrived 309 ms old; the player heard the sound of an
+/// action a fifth of a second after they saw it.
+///
+/// 40 ms is still generous: the video path measures sub-millisecond packet
+/// reordering on this link, so the audio needs room for a packet to be late,
+/// not for a packet to be missing.
+const AUDIO_JITTER_DEADLINE_MS: u64 = 40;
 const LOW_FPS_DAMAGE_LIMIT: u8 = 8;
 const HIGH_FPS_DAMAGE_LIMIT: u8 = 3;
 /// Frames kept in the reassembly queue while the head frame waits for its
