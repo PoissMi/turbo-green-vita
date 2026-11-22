@@ -4,12 +4,18 @@ use super::{DecodedFrame, DecoderConfig, DirectVideoOutput};
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, select_biased, unbounded};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 // Faster streams arrive in larger bursts. Keep a small buffer at 30 fps (vita-moonlight
 // tolerates 4 pending frames before flushing to IDR), with room for ~100 ms near 55 fps.
+/// Decode-result queue depth. Frames overwrite in latest_result when the
+/// RTC thread hasn't drained yet; a depth of 3 absorbs a one-frame backlog
+/// without adding latency (consumer always takes the newest first, see
+/// `media.rs:drain_decoder`).
+const RESULT_QUEUE_DEPTH: usize = 3;
 const MIN_PENDING_ACCESS_UNITS: usize = 3;
 const MAX_PENDING_ACCESS_UNITS: usize = 6;
 
@@ -30,7 +36,7 @@ pub struct VideoDecodeWorker {
     access_units: Sender<QueuedAccessUnit>,
     commands: Sender<DecoderCommand>,
     generation: Arc<AtomicU64>,
-    pub(crate) latest_result: Arc<Mutex<Option<DecodeResult>>>,
+    pub(crate) latest_result: Arc<Mutex<VecDeque<DecodeResult>>>,
     pub(crate) result_ready: Arc<tokio::sync::Notify>,
 }
 
@@ -44,7 +50,7 @@ impl VideoDecodeWorker {
         let (commands, worker_commands) = unbounded();
         let generation = Arc::new(AtomicU64::new(0));
         let worker_generation = Arc::clone(&generation);
-        let latest_result = Arc::new(Mutex::new(None));
+        let latest_result = Arc::new(Mutex::new(VecDeque::new()));
         let worker_latest_result = Arc::clone(&latest_result);
         let result_ready = Arc::new(tokio::sync::Notify::new());
         let worker_result_ready = Arc::clone(&result_ready);
@@ -145,7 +151,7 @@ fn run_decode_loop(
     access_units: Receiver<QueuedAccessUnit>,
     commands: Receiver<DecoderCommand>,
     generation: Arc<AtomicU64>,
-    latest_result: Arc<Mutex<Option<DecodeResult>>>,
+    latest_result: Arc<Mutex<VecDeque<DecodeResult>>>,
     result_ready: Arc<tokio::sync::Notify>,
     initial_decoder: HwVideoDecoder,
     config: DecoderConfig,
@@ -182,7 +188,7 @@ fn decode_queued_access_unit(
     decoder: &mut Option<HwVideoDecoder>,
     config: DecoderConfig,
     generation: &AtomicU64,
-    latest_result: &Mutex<Option<DecodeResult>>,
+    latest_result: &Mutex<VecDeque<DecodeResult>>,
     result_ready: &tokio::sync::Notify,
     access_unit: QueuedAccessUnit,
     direct_output: &DirectVideoOutput,
@@ -262,14 +268,16 @@ fn decode_queued_access_unit(
 }
 
 fn publish_result(
-    slot: &Mutex<Option<DecodeResult>>,
+    slot: &Mutex<VecDeque<DecodeResult>>,
     result_ready: &tokio::sync::Notify,
     result: DecodeResult,
 ) {
-    if let Ok(mut latest) = slot.lock()
-        && latest.replace(result).is_some()
-    {
-        metrics::METRICS.replaced.fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut queue) = slot.lock() {
+        if queue.len() >= RESULT_QUEUE_DEPTH {
+            queue.pop_front();
+            metrics::METRICS.replaced.fetch_add(1, Ordering::Relaxed);
+        }
+        queue.push_back(result);
     }
     result_ready.notify_one();
 }
