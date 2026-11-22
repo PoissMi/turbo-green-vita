@@ -34,7 +34,6 @@ impl I18n {
             | AppState::RequestingDeviceCode(_)
             | AppState::LoadingCredentials(_) => "screen-signing-in",
             AppState::WaitingForDeviceAuthorization { .. } => "screen-token-setup",
-            AppState::ModeSelect { .. } => "screen-mode-select",
             AppState::LoadingTitles(_) | AppState::TitleList { .. } => "screen-cloud-titles",
             AppState::LoadingConsoles(_) | AppState::ConsoleList { .. } => "screen-consoles",
             AppState::StartingStream { .. } | AppState::Connecting { .. } => "screen-connecting",

@@ -28,7 +28,11 @@ const DIRECTION_REPEAT_INITIAL_DELAY: Duration = Duration::from_millis(350);
 const DIRECTION_REPEAT_INTERVAL: Duration = Duration::from_millis(90);
 const STREAM_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(4);
 
-pub(crate) const TARGET_FRAME_TIME: Duration = Duration::from_millis(16);
+pub(crate) const TARGET_FRAME_TIME: Duration = Duration::from_millis(15);
+/// While streaming with no overlay visible, egui is rebuilt at this rate
+/// instead of every loop iteration. The video itself still presents every
+/// iteration; only the CPU-side `run`/`tessellate`/`paint` work is throttled.
+const STREAM_OVERLAY_FRAME_TIME: Duration = Duration::from_millis(100);
 
 pub async fn run(mut app: App) -> Result<()> {
     crate::streaming::video::reserve_yuv_output()
@@ -56,6 +60,7 @@ pub async fn run(mut app: App) -> Result<()> {
     let mut last_direction_repeat_at = Instant::now();
     let mut vita_ime_active = false;
     let mut vita_ime_pending = None;
+    let mut last_overlay_at = Instant::now().checked_sub(STREAM_OVERLAY_FRAME_TIME).unwrap_or_else(Instant::now);
 
     loop {
         let loop_started_at = Instant::now();
@@ -205,44 +210,71 @@ pub async fn run(mut app: App) -> Result<()> {
         }
         surface.sync_video_frame(app.state.streaming())?;
 
-        let raw_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(WIDTH as f32 / UI_SCALE, HEIGHT as f32 / UI_SCALE),
-            )),
-            viewport_id: egui::ViewportId::ROOT,
-            viewports: std::iter::once((
-                egui::ViewportId::ROOT,
-                egui::ViewportInfo {
-                    native_pixels_per_point: Some(UI_SCALE),
-                    ..Default::default()
-                },
-            ))
-            .collect(),
-            time: Some(start_time.elapsed().as_secs_f64()),
-            predicted_dt: TARGET_FRAME_TIME.as_secs_f32(),
-            events: egui_events,
-            ..Default::default()
+        // --- Overlay throttle -------------------------------------------------
+        // While streaming unpaused, the only egui content is the transient
+        // "hold back to pause" hint (2s + 1s fade at stream start), an
+        // optional 1Hz debug line, and the Back-hold progress ring.
+        // Rebuilding + tessellating + painting that every 16ms on the main
+        // thread eats directly into the frame budget the 720p upload needs.
+        // So: video presents every iteration; egui runs at 10Hz normally
+        // (60Hz when the hold ring is active, so it stays smooth).
+        let needs_overlay = matches!(&app.state, AppState::Streaming(s) if !s.paused);
+        let overlay_elapsed = last_overlay_at.elapsed();
+        let overlay_interval = if hold_progress.is_some() {
+            TARGET_FRAME_TIME
+        } else {
+            STREAM_OVERLAY_FRAME_TIME
         };
+        let run_overlay = !needs_overlay || egui_events.len() > 0 || overlay_elapsed >= overlay_interval;
+        if run_overlay {
+            last_overlay_at = Instant::now();
+            let raw_input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(WIDTH as f32 / UI_SCALE, HEIGHT as f32 / UI_SCALE),
+                )),
+                viewport_id: egui::ViewportId::ROOT,
+                viewports: std::iter::once((
+                    egui::ViewportId::ROOT,
+                    egui::ViewportInfo {
+                        native_pixels_per_point: Some(UI_SCALE),
+                        ..Default::default()
+                    },
+                ))
+                .collect(),
+                time: Some(start_time.elapsed().as_secs_f64()),
+                predicted_dt: TARGET_FRAME_TIME.as_secs_f32(),
+                events: egui_events,
+                ..Default::default()
+            };
 
-        let mut ui_commands = Vec::new();
-        let full_output = egui_ctx.run(raw_input, |ctx| {
-            ui_commands = build_ui(ctx, &app, hold_progress);
-        });
+            let mut ui_commands = Vec::new();
+            let full_output = egui_ctx.run(raw_input, |ctx| {
+                ui_commands = build_ui(ctx, &app, hold_progress);
+            });
 
-        for command in ui_commands {
-            app.handle_command(command).await?;
+            for command in ui_commands {
+                app.handle_command(command).await?;
+            }
+
+            surface.draw_scene(matches!(&app.state, AppState::Streaming(_)))?;
+            let clipped_primitives =
+                egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+            surface.paint_egui(
+                full_output.pixels_per_point,
+                &clipped_primitives,
+                &full_output.textures_delta,
+            )?;
+        } else {
+            surface.present_video_only(true)?;
         }
-
-        surface.draw_scene(matches!(&app.state, AppState::Streaming(_)))?;
-        let clipped_primitives =
-            egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
-        surface.paint_egui(
-            full_output.pixels_per_point,
-            &clipped_primitives,
-            &full_output.textures_delta,
-        )?;
         let frame_deadline = loop_started_at + TARGET_FRAME_TIME;
+        // Diagnostics: how long the loop's CPU work + blocking present took,
+        // vs the 16.7ms vsync window. pr/loop in the HUD.
+        crate::streaming::video::metrics::METRICS.loop_us.store(
+            loop_started_at.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         // While streaming, a decoded frame wakes the loop early instead of waiting out the
         // frame budget; the deadline still caps latency for UI/input when the stream stalls.
         let frame_ready = app

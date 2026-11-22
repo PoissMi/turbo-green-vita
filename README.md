@@ -39,11 +39,15 @@ shipped the latency work; the changes after it target decoder throughput.
 - **Low-delay H.264 decode mode.** The hardware decoder is configured for
   minimal internal reordering, so B-frame streams no longer buffer several
   access units before the first picture is output.
-- **4 reference frames** (up from 1), which removes the visible corruption
-  (datamoshing) during motion in high-bitrate scenes.
-- **Triple-buffered video textures.** Decoded frames write into a third
-  texture, so the decoder no longer stalls waiting for the previous frame to
-  be displayed, and a not-yet-shown frame is never overwritten.
+- **4 reference frames** (up from 1; **2 since 0.4.0** for faster decode),
+  which removes the visible corruption (datamoshing) during motion in
+  high-bitrate scenes.
+- **Triple-buffered staging** (3 CDRAM slots) plus **triple-buffered
+  display textures** (0.4.0). Decoded frames write into a staging slot so
+  the decoder never stalls waiting for the previous frame to be displayed,
+  and the renderer records the GXM scene per display texture so it only
+  waits for the scene that sampled the texture being reused — the other
+  in-flight scenes overlap CPU tessellation.
 - **Decode-driven rendering.** The UI loop wakes as soon as a frame is
   decoded instead of polling on a fixed timer, cutting up to one render-tick
   of added latency per frame.
@@ -90,6 +94,50 @@ the larger improvement.
   SDL and waits for its scene to finish before the next upload or before
   destroying the displayed texture.
 
+**Present path (0.4.0):**
+
+On-device profiling showed the old `SDL_UpdateNVTexture` CPU memcpy out of
+uncached CDRAM ran at ~69 MB/s — **20.5 ms per 720p frame**, capping the
+display at ~30 fps even though the decoder sustained 60. The fixes below
+moved that to **1 ms** and took simple scenes from 60/30 to 60/58–60
+presented/decoded.
+
+- **DMA-based NV12 upload (0.4.0).** The upload now runs on the Vita DMA
+  engine (`sceDmacMemcpy`, Y and UV planes) into the locked SDL streaming
+  texture instead of a CPU memcpy from non-cached memory. This bypasses
+  the CPU caches entirely: upload **20,481 µs → 1,057 µs** on device,
+  loop total 27,912 µs → ~5,000 µs. (`up` in the HUD.)
+- **Per-texture GXM scene tracking (0.4.0).** Three rotating display
+  textures replace the single streaming texture; `sceGxmFinish` now only
+  waits for the scene that sampled the texture being reused (3 frames old),
+  so GPU work overlaps CPU instead of blocking it. GPU wait dropped to
+  ~5 µs (`gpu` in the HUD).
+- **Overlay throttling with cached replay (0.4.0).** While streaming, egui
+  rebuilds at 10 Hz instead of every loop iteration; video still presents
+  every iteration. The debug HUD replays its last tessellated geometry on
+  presentation-only frames so it stays steady instead of strobing. The
+  bright-green monospace chip replaced the white-on-transparent debug
+  line, which was unreadable over game content.
+- **Decode priority + 15 ms loop deadline (0.4.0).** The decode thread is
+  raised to `SDL_THREAD_PRIORITY_HIGH` on its pinned core, and the loop
+  deadline is 15 ms, so late-decode frames land closer to the vsync edge.
+- **Decode-result queue + drain-after-receive (0.4.0).** Decode results
+  move through a depth-3 queue instead of a single replaceable slot, and
+  the RTC pump drains the queue *after* receiving RTP — previously a pump
+  cycle stranded just-decoded frames for a full cycle (`repl` metric,
+  11→2 in complex scenes; pipeline age halved).
+- **TransportLayerNack loss recovery (0.4.0).** NACK feedback was
+  negotiated in the SDP but never sent; every Wi-Fi loss became a keyframe
+  skip. The reassembler now reports missing sequence numbers and the pump
+  sends a 16-bit-bitmap `TransportLayerNack`. New `nack:` counter in the
+  HUD (between `drop:` and `err:`).
+- **HUD additions (0.4.0).** `pr` (blocking `present()` time), `loop`
+  (loop-start to present-return), `slot` (staging-slot misses), and `nack`
+  (NACKs sent) — the numbers used to find the upload bottleneck above.
+- **Removing per-frame allocations (0.4.0).** `missing_sequences` uses a
+  binary search instead of a `HashSet`, and the assembled AU moves as a
+  `Vec<u8>` instead of being copied via `Bytes::to_vec()`.
+
 ### Max bitrate setting
 
 A new **Max bitrate** row in Settings advertises a bitrate cap (2, 3, 4, 5, 6,
@@ -103,6 +151,9 @@ is 2 Mbps, matching upstream behavior. Settings saved with older values
 - Full rebrand to **Turbo GreenVita** (`TURBOVITA` title ID): logo, LiveArea,
   localized strings, release workflow, and package name.
 - Reworked game-profile menu and Select button mapping.
+- **No CHOOSE MODE screen (0.4.0).** After sign-in you go straight into the
+  Cloud title list. The Home (console) path is left compiled but
+  unreachable; back-navigation now returns to the title list.
 
 ## Install
 

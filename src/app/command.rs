@@ -107,7 +107,6 @@ impl App {
             AppState::ConsoleList { .. } | AppState::LoadingConsoles(_) => {
                 self.handle_console_list_input(command).await
             }
-            AppState::ModeSelect { .. } => self.handle_mode_select_input(command),
             AppState::Streaming(streaming) if streaming.paused => {
                 self.handle_paused_overlay_input(command).await
             }
@@ -120,7 +119,7 @@ impl App {
                     if *retry_sign_in {
                         self.set_state(AppState::InitializeAuthentication);
                     } else {
-                        self.set_state(AppState::ModeSelect { selected: 0 });
+                        self.set_state(AppState::TitleList { selected: 0 });
                     }
                 }
                 Ok(())
@@ -169,8 +168,7 @@ impl App {
     pub(crate) fn open_settings(&mut self) {
         let selected = match &self.state {
             AppState::TitleList { selected }
-            | AppState::ConsoleList { selected }
-            | AppState::ModeSelect { selected } => *selected,
+            | AppState::ConsoleList { selected } => *selected,
             _ => 0,
         };
         let title_id = match &self.state {
@@ -184,7 +182,7 @@ impl App {
             | AppState::Streaming(_) => self.state.active_title_id().map(str::to_owned),
             _ => None,
         };
-        let return_to = std::mem::replace(&mut self.state, AppState::ModeSelect { selected: 0 });
+        let return_to = std::mem::replace(&mut self.state, AppState::TitleList { selected: 0 });
         self.set_state(AppState::Settings {
             return_to: Box::new(return_to),
             selected: 0,

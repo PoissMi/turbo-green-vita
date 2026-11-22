@@ -5,6 +5,8 @@ use vitasdk_sys::*;
 
 const PHYCONT_GRANULARITY: u32 = 1024 * 1024;
 const CDRAM_ALIGNMENT: u32 = 256 * 1024;
+// Keep the name: it previously used USER_CDRAM_RW; the constant remains
+// for the (now-unused) fallback path label. See `allocate`.
 
 static IDLE_BUFFER: Mutex<Option<DecoderBlock>> = Mutex::new(None);
 
@@ -64,6 +66,10 @@ impl Drop for DecoderFrameBuffer {
 
 impl DecoderBlock {
     pub(super) fn allocate(size: u32, phycont: bool) -> Result<Self> {
+        // `phycont == false` means the staging slots (DirectVideoOutput):
+        // CDRAM (non-cached). The HW decoder DMA-writes into them, so they
+        // must be NC — cached MAIN caused stale-cache macroblocking on
+        // device (decoder DMA without cache invalidation).
         let (mem_type, alignment, pool) = if phycont {
             (SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW, PHYCONT_GRANULARITY, "PHYCONT-NC")
         } else {
@@ -79,6 +85,7 @@ impl DecoderBlock {
             flags: 0,
             reserved: [0; 10],
         };
+        // MAIN pools need the alignment options; PHYCONT-NC rejects them.
         let options = if phycont { std::ptr::null_mut() } else { &mut options };
         let uid = unsafe {
             sceKernelAllocMemBlock(c"xcloud_avcdec_frame".as_ptr(), mem_type, capacity, options)

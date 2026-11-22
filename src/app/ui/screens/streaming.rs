@@ -37,12 +37,25 @@ pub(crate) fn show(ctx: &egui::Context, app: &App, hold_progress: Option<f32>) {
         }
 
         if app.settings.show_stream_debug_info {
+            // Bright green on a solid dark chip so the line stays readable
+            // over any video content (previously white-ish at 0.75 alpha
+            // with a transparent panel, which washed out).
+            let debug_bg = egui::Color32::from_rgba_unmultiplied(0x05, 0x1a, 0x05, 200);
+            let debug_fg = egui::Color32::from_rgb(0x52, 0xf5, 0x3d);
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.add_space(12.0);
-                ui.colored_label(
-                    theme.text.gamma_multiply(0.75),
-                    egui::RichText::new(&streaming.status).size(12.0),
-                );
+                egui::Frame::NONE
+                    .fill(debug_bg)
+                    .inner_margin(egui::Margin::symmetric(6, 3))
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(&streaming.status)
+                                .size(14.0)
+                                .color(debug_fg)
+                                .font(egui::FontId::monospace(14.0)),
+                        );
+                    });
                 ui.add_space(12.0);
             });
         }

@@ -124,6 +124,11 @@ impl<B: RtcSessionBackend> RtcSession<B> {
         self.transport.receive(&mut self.peer);
         let gathered_candidates = self.handle_peer_events();
         let mut keyframe_requested = self.handle_peer_messages();
+        // Drain AFTER receiving: decode results produced since the last pump
+        // must be picked up in the same iteration so the worker's
+        // `latest_frame` latch (session.video.latest_frame.take()) sees them
+        // before overwriting. Draining before receive stranded them one
+        // pump cycle and counted as `repl`.
         self.video.drain_decoder(&mut keyframe_requested);
 
         let now = Instant::now();
@@ -138,6 +143,7 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             keyframe_requested = true;
         }
         self.request_keyframe(keyframe_requested, now);
+        self.video.flush_nacks(&mut self.peer);
         if self
             .last_bandwidth_report
             .is_none_or(|previous| now.duration_since(previous) >= BANDWIDTH_REPORT_INTERVAL)

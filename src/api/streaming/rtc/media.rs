@@ -17,6 +17,8 @@ struct VideoStats {
     decode_errors: u64,
     last_sample_duration_us: Option<u64>,
     encoded_resolution: Option<(u32, u32)>,
+    nack_pending: Vec<u16>,
+    nacks_sent: u64,
 }
 
 pub(crate) struct VideoReceiver {
@@ -76,6 +78,12 @@ impl VideoReceiver {
             .bytes_since_report
             .saturating_add(packet.payload.len() as u64);
         let sample_stats = self.rtp.receive(&self.decoder, packet, keyframe_requested);
+        // NACK is sent from `drain_decoder` (which has the peer); stash the
+        // sequence numbers on VideoStats for one pump cycle.
+        if !sample_stats.nack_sequence_numbers.is_empty() {
+            self.stats.nack_pending
+                .extend(sample_stats.nack_sequence_numbers.iter().copied());
+        }
         self.stats.dropped = self
             .stats
             .dropped
@@ -90,17 +98,30 @@ impl VideoReceiver {
 
     pub(crate) fn drain_decoder(&mut self, keyframe_requested: &mut bool) {
         let mut decode_errors = 0u64;
-        while let Some(result) = self
+        // Drain the full queue each pump so a burst doesn't strand frames:
+        // take every result but only the newest becomes `latest_frame`.
+        // Frames that are older than the newest are still counted as
+        // replaced, but they were at least offered to the loop first —
+        // the loop's `latest_frame.take()` never sees a stale overwrite
+        // from *this* drain because the worker latch is checked immediately
+        // after pump() returns.
+        let drained: Vec<_> = self
             .decoder
             .latest_result
             .lock()
-            .ok()
-            .and_then(|mut latest| latest.take())
-        {
+            .map(|mut queue| queue.drain(..).collect())
+            .unwrap_or_default();
+        // Keep only the last OK frame (newest); count the rest as replaced.
+        let mut latest_ok = None;
+        for result in drained {
             match result {
                 Ok(frame) => {
                     self.next_frame_id = self.next_frame_id.wrapping_add(1);
-                    self.latest_frame = Some((self.next_frame_id, frame));
+                    if latest_ok.replace((self.next_frame_id, frame)).is_some() {
+                        crate::streaming::video::metrics::METRICS
+                            .replaced
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 Err(error) => {
                     eprintln!("Failed to decode H264 video frame: {error}");
@@ -108,6 +129,9 @@ impl VideoReceiver {
                     *keyframe_requested = true;
                 }
             }
+        }
+        if let Some(frame) = latest_ok {
+            self.latest_frame = Some(frame);
         }
 
         if decode_errors > 0 {
@@ -127,6 +151,57 @@ impl VideoReceiver {
                 media_ssrc: ssrc,
             };
             let _ = receiver.write_rtcp(vec![Box::new(pli)]);
+        }
+    }
+
+    /// Send TransportLayerNack for sequence numbers flagged missing by the
+    /// reassembler. Transport feedback (`nack`) is already negotiated in
+    /// the SDP; previously it was never sent, so every Wi-Fi loss became
+    /// a keyframe skip.
+    pub(crate) fn flush_nacks(&mut self, peer: &mut RTCPeerConnection) {
+        if self.stats.nack_pending.is_empty() {
+            return;
+        }
+        let (Some(receiver_id), Some(ssrc)) = (self.receiver_id, self.ssrc) else {
+            self.stats.nack_pending.clear();
+            return;
+        };
+        let sequences = std::mem::take(&mut self.stats.nack_pending);
+        // Group into NACK bitmap pairs: each pair names one missing sequence
+        // plus a 16-bit bitmap for the next 16 positions. Sort + dedup first
+        // so pairs are emitted in sequence order.
+        let mut sorted = sequences.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let mut nacks: Vec<rtcp::transport_feedbacks::transport_layer_nack::NackPair> = Vec::new();
+        let mut i = 0;
+        while i < sorted.len() {
+            let pid = sorted[i];
+            let mut bitmap: u16 = 0;
+            let mut j = i + 1;
+            while j < sorted.len() {
+                let dist = sorted[j].wrapping_sub(pid);
+                if dist == 0 || dist > 16 {
+                    break;
+                }
+                bitmap |= 1u16 << (dist - 1);
+                j += 1;
+            }
+            nacks.push(rtcp::transport_feedbacks::transport_layer_nack::NackPair {
+                packet_id: pid,
+                lost_packets: bitmap,
+            });
+            i = j;
+        }
+        if let Some(mut receiver) = peer.rtp_receiver(receiver_id) {
+            let nack = rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack {
+                sender_ssrc: 0,
+                media_ssrc: ssrc,
+                nacks,
+            };
+            let _ = receiver.write_rtcp(vec![Box::new(nack)]);
+            self.stats.nacks_sent =
+                self.stats.nacks_sent.saturating_add(sequences.len() as u64);
         }
     }
 
@@ -172,9 +247,10 @@ impl VideoReceiver {
             "CDRAM"
         };
         Some(format!(
-            "mem:{memory} out:NV12 net:{bitrate_kbps}kbps enc:{encoded_resolution} srcfps:{source_fps} {performance} wait:{} drop:{} err:{}",
+            "mem:{memory} out:NV12 net:{bitrate_kbps}kbps enc:{encoded_resolution} srcfps:{source_fps} {performance} wait:{} drop:{} nack:{} err:{}",
             u8::from(self.rtp.waiting_for_keyframe()),
             self.stats.dropped,
+            self.stats.nacks_sent,
             self.stats.decode_errors,
         ))
     }

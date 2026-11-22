@@ -39,9 +39,6 @@ pub fn build_ui(ctx: &egui::Context, app: &App, hold_progress: Option<f32>) -> V
         AppState::WaitingForDeviceAuthorization { .. } => {
             screens::token_setup::show(ctx, app);
         }
-        AppState::ModeSelect { .. } => {
-            screens::mode_select::show(ctx, app, &mut commands);
-        }
         AppState::Settings { .. } => {
             screens::settings::show(ctx, app, &mut commands);
         }

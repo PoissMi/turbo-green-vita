@@ -24,6 +24,9 @@ pub(super) struct VideoSampleStats {
     pub dropped: u32,
     pub source_frame_duration_us: Option<u64>,
     pub encoded_resolution: Option<(u32, u32)>,
+    /// Missing sequence numbers to NACK back to the sender (transport
+    /// feedback was negotiated but previously never sent).
+    pub nack_sequence_numbers: Vec<u16>,
 }
 
 pub(super) struct AudioRtp {
@@ -76,7 +79,7 @@ struct PendingVideoFrame {
 
 enum FrameAssembly {
     Pending,
-    Complete { data: Bytes, marker_sequence: u16 },
+    Complete { data: Vec<u8>, marker_sequence: u16 },
     Invalid,
 }
 
@@ -89,6 +92,22 @@ impl PendingVideoFrame {
         }
     }
 
+    fn insert_sorted(&mut self, packet: Packet) {
+        // Packets are kept unsorted here; `assemble` sorts by forward
+        // sequence distance from the marker (arrival-order independent).
+        // Incremental ordered insertion is unsafe for out-of-order delivery
+        // (a packet arriving before the head mis-orders the buffer), so the
+        // sort stays in assemble — the optimization is NACK + queue work
+        // elsewhere, not here.
+        if !self
+            .packets
+            .iter()
+            .any(|existing| existing.header.sequence_number == packet.header.sequence_number)
+        {
+            self.packets.push(packet);
+        }
+    }
+    #[allow(dead_code)]
     fn insert(&mut self, packet: Packet) {
         if !self
             .packets
@@ -106,6 +125,37 @@ impl PendingVideoFrame {
             .map(|packet| packet.header.sequence_number)
     }
 
+    /// Sequence numbers never seen for this frame (gaps below the marker),
+    /// limited to the transport NACK bitmap window (16 packets).
+    fn missing_sequences(&self) -> Vec<u16> {
+        let Some(marker) = self.marker_sequence() else {
+            return Vec::new();
+        };
+        // Walk back from marker to first received packet's neighbourhood.
+        // The smallest seen sequence bounds the window.
+        let mut seqs = self.packets.iter().map(|p| p.header.sequence_number).collect::<Vec<_>>();
+        seqs.sort_unstable();
+        let start = seqs.first().copied().unwrap_or(marker);
+        let mut missing = Vec::new();
+        let mut seq = start;
+        // At most 16 iterations: the NACK bitmap covers packet_id + 16 bits.
+        // `seqs` is sorted; membership is a binary search, no HashSet alloc.
+        for _ in 0..16 {
+            if seqs.binary_search(&seq).is_err() {
+                missing.push(seq);
+            }
+            if seq == marker {
+                break;
+            }
+            seq = seq.wrapping_add(1);
+            // Stop once we've passed the marker forward distance.
+            if marker.wrapping_sub(seq) > 16 {
+                break;
+            }
+        }
+        missing
+    }
+
     fn assemble(
         &self,
         depacketizer: &mut H264Packet,
@@ -114,6 +164,9 @@ impl PendingVideoFrame {
         let Some(marker_sequence) = self.marker_sequence() else {
             return FrameAssembly::Pending;
         };
+        // Sort by forward sequence distance from the marker: arrival-order
+        // independent (packets arrive out of order). Previously this ran
+        // on every receive (O(n^2) per frame); see insert_sorted.
         let mut packets = self.packets.iter().collect::<Vec<_>>();
         packets.sort_unstable_by_key(|packet| {
             std::cmp::Reverse(marker_sequence.wrapping_sub(packet.header.sequence_number))
@@ -147,7 +200,7 @@ impl PendingVideoFrame {
         }
         *depacketizer = H264Packet::default();
         FrameAssembly::Complete {
-            data: Bytes::from(data),
+            data,
             marker_sequence,
         }
     }
@@ -200,6 +253,13 @@ impl VideoRtp {
                 return stats;
             }
             if let Some(incomplete) = self.pending.take() {
+                let missing = incomplete.missing_sequences();
+                if !missing.is_empty() {
+                    // Send NACK for the gaps before discarding the frame:
+                    // a retransmitted packet can still complete it, and the
+                    // damage counter stays honest about the gaps.
+                    stats.nack_sequence_numbers.extend(missing);
+                }
                 self.next_sequence = incomplete
                     .marker_sequence()
                     .map(|sequence| sequence.wrapping_add(1));
@@ -219,7 +279,7 @@ impl VideoRtp {
             }
             self.pending = Some(PendingVideoFrame::new(packet));
         } else if let Some(pending) = &mut self.pending {
-            pending.insert(packet);
+            pending.insert_sorted(packet);
         }
 
         let assembly = self
@@ -313,7 +373,7 @@ impl VideoRtp {
             self.damage_score = self.damage_score.saturating_sub(1);
         }
 
-        if !worker.submit_access_unit(data.to_vec(), self.source_frame_duration_us) {
+        if !worker.submit_access_unit(data, self.source_frame_duration_us) {
             eprintln!("Video decoder queue is full; continuing while requesting a keyframe");
             *keyframe_requested = true;
             stats.dropped = stats.dropped.saturating_add(1);

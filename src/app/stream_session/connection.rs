@@ -120,7 +120,7 @@ impl App {
     }
 
     pub(in crate::app) async fn pump_connection(&mut self) -> Result<()> {
-        let state = std::mem::replace(&mut self.state, AppState::ModeSelect { selected: 0 });
+        let state = std::mem::replace(&mut self.state, AppState::TitleList { selected: 0 });
         let next_state = match state {
             AppState::StartingStream { target, job } => match job {
                 Some(job) => match poll_job(job).await {
