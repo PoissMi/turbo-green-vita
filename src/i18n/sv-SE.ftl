@@ -16,6 +16,7 @@ settings-cloud = Moln
 settings-home = Hem
 settings-locale = Språk/region
 settings-max-bitrate = Maximal bithastighet
+settings-frame-rate = Bildfrekvens
 settings-game = Spelinställningar
 settings-swap-shoulders-triggers = Byt L1/L2 och R1/R2
 settings-front-touch-auxiliary-buttons = Använd främre pekskärmen för L2/R2/L3/R3 i stället för mus

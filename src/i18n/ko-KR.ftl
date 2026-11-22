@@ -16,6 +16,7 @@ settings-cloud = 클라우드
 settings-home = 홈
 settings-locale = 언어/지역
 settings-max-bitrate = 최대 비트레이트
+settings-frame-rate = 프레임 레이트
 settings-game = 게임 설정
 settings-swap-shoulders-triggers = L1/L2 및 R1/R2 바꾸기
 settings-front-touch-auxiliary-buttons = 전면 터치를 마우스 대신 L2/R2/L3/R3로 사용

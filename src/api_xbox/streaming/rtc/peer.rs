@@ -19,6 +19,7 @@ pub(super) fn create(
     max_bitrate_kbps: u32,
     video_width: u32,
     video_height: u32,
+    video_fps: u32,
 ) -> Result<(RTCPeerConnection, XboxRtcProtocol)> {
     let mut media_engine = MediaEngine::default();
     register_vita_codecs(&mut media_engine).context("failed to register Vita codecs")?;
@@ -48,7 +49,13 @@ pub(super) fn create(
 
     Ok((
         peer_connection,
-        XboxRtcProtocol::new(channel_ids, max_bitrate_kbps, video_width, video_height),
+        XboxRtcProtocol::new(
+            channel_ids,
+            max_bitrate_kbps,
+            video_width,
+            video_height,
+            video_fps,
+        ),
     ))
 }
 
