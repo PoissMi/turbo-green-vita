@@ -21,6 +21,29 @@ const INITIAL_VIDEO_KEYFRAME_INTERVAL: Duration = Duration::from_millis(500);
 /// The server is never asked for less than this, so a struggling path
 /// degrades in quality instead of collapsing the stream.
 const MIN_BANDWIDTH_ESTIMATE_KBPS: u32 = 1500;
+/// The rate we never ask the server for above.
+///
+/// The server sizes its encoder from what we request, and a 720p60 encode
+/// stops finishing in real time well below the rates a client can ask for.
+/// When that happens the finished frames pile up in front of us: the
+/// picture falls behind the sound by hundreds of milliseconds while every
+/// number in the stream still looks healthy. The reason it stays invisible
+/// is that the RTP timestamps are stamped when a frame goes out, not when
+/// it was captured, so the backlog cannot be seen from the client at all -
+/// not through the frame age, not through the server timeline, not through
+/// the video/audio tick comparison.
+///
+/// That leaves one lever that works without measuring anything: ask for
+/// less. The user's setting stays the ceiling; this is what we actually
+/// request, and the governor may go below it when the path struggles.
+pub(crate) const PROACTIVE_BITRATE_CAP_KBPS: u32 = 3000;
+
+/// The rate to ask the server for, after the proactive cap.
+pub(crate) fn effective_bitrate_kbps(requested_kbps: u32) -> u32 {
+    requested_kbps
+        .min(PROACTIVE_BITRATE_CAP_KBPS)
+        .max(MIN_BANDWIDTH_ESTIMATE_KBPS)
+}
 /// The server's video timeline slipping by more than this over a minute means
 /// a queue is growing in front of us.
 const DRIFT_BACKOFF_MS: i64 = 25;
@@ -43,6 +66,9 @@ pub(crate) struct RtcSessionConfig {
     pub audio_sample_rate: u32,
     pub audio_payload_type: u8,
     pub max_video_bitrate_kbps: u32,
+    /// The frame rate asked for from the server. Shown in the HUD so the
+    /// requested rate can be compared with the one the server delivers.
+    pub video_fps: u32,
     pub decoder: DecoderConfig,
 }
 
@@ -73,6 +99,8 @@ pub(crate) struct RtcSession<B: RtcSessionBackend> {
     pub(crate) video: VideoReceiver,
     pub(crate) audio: AudioReceiver,
     max_video_bitrate_kbps: u32,
+    /// The frame rate we asked the server for.
+    video_fps: u32,
     /// What we currently ask the server for. The user's setting is the
     /// ceiling; this is what the path has actually proven it can carry.
     bandwidth_estimate_kbps: u32,
@@ -102,7 +130,8 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             video,
             audio: AudioReceiver::new(config.audio_sample_rate, config.audio_payload_type),
             max_video_bitrate_kbps: config.max_video_bitrate_kbps,
-            bandwidth_estimate_kbps: config.max_video_bitrate_kbps,
+            video_fps: config.video_fps,
+            bandwidth_estimate_kbps: effective_bitrate_kbps(config.max_video_bitrate_kbps),
             last_bandwidth_report: None,
             last_keyframe_request: None,
             initial_video_watchdog_started_at: None,
@@ -179,7 +208,10 @@ impl<B: RtcSessionBackend> RtcSession<B> {
                 .server_video_size()
                 .map(|(width, height)| format!("srv:{width}x{height}"))
                 .unwrap_or_else(|| "srv:?".to_owned());
-            self.status = format!("cap:{}kbps {server} {status}", self.max_video_bitrate_kbps);
+            self.status = format!(
+                "cap:{}kbps fps:{} {server} {status}",
+                self.max_video_bitrate_kbps, self.video_fps
+            );
             eprintln!("{}", self.status);
         }
 
@@ -201,9 +233,10 @@ impl<B: RtcSessionBackend> RtcSession<B> {
     /// user's setting stays the ceiling: the estimate climbs back towards it
     /// whenever the path keeps up.
     fn next_bandwidth_estimate(&mut self) -> u32 {
-        let ceiling = self
-            .max_video_bitrate_kbps
-            .max(MIN_BANDWIDTH_ESTIMATE_KBPS);
+        // The user's setting is the ceiling, but the proactive cap is lower:
+        // the server's encoder falls behind well before the rate the client
+        // can ask for, and that backlog is invisible in the stream.
+        let ceiling = effective_bitrate_kbps(self.max_video_bitrate_kbps);
         let drift_ms = crate::streaming::video::metrics::METRICS
             .server_drift_us
             .load(std::sync::atomic::Ordering::Relaxed)

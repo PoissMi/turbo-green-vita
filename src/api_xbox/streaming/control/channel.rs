@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::api::streaming::rtc::peer::RtcDataChannelConfig;
+use crate::api::streaming::rtc::session::effective_bitrate_kbps;
 use crate::api_xbox::streaming::rtc::protocol::ChannelIds;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -19,6 +20,7 @@ pub(in crate::api_xbox::streaming) fn handle_data_channel_message(
     max_bitrate_kbps: u32,
     video_width: u32,
     video_height: u32,
+    video_fps: u32,
     handshake_stage: &mut HandshakeStage,
     channel_id: RTCDataChannelId,
     data: &[u8],
@@ -36,9 +38,16 @@ pub(in crate::api_xbox::streaming) fn handle_data_channel_message(
     if let Some(mut control_channel) = pc.data_channel(ids.control) {
         let _ = control_channel.send_text(authorization_request().to_string());
         let _ = control_channel.send_text(gamepad_changed(0, true).to_string());
+        // The frame rate is asked for on the control channel as well as in
+        // the capabilities message: the server takes the rate from the
+        // capabilities `supportsFps` field only sometimes, and the video
+        // preference is the message that names the frame rate directly.
+        let _ = control_channel.send_text(
+            video_preference(video_width, video_height, video_fps).to_string(),
+        );
     }
     if let Some(mut message_channel) = pc.data_channel(ids.message) {
-        for message in startup_messages(max_bitrate_kbps, video_width, video_height) {
+        for message in startup_messages(max_bitrate_kbps, video_width, video_height, video_fps) {
             let _ = message_channel.send_text(message.to_string());
         }
     }
@@ -120,6 +129,22 @@ pub fn video_keyframe_requested(ifr_requested: bool) -> Value {
     })
 }
 
+/// The video preference the control channel accepts.
+///
+/// The capabilities message carries `supportsFps`, but the server has been
+/// seen to deliver 60 fps even when a client asks for 30, so the frame
+/// rate is requested a second time here, where the rate is named outright.
+pub fn video_preference(width: u32, height: u32, fps: u32) -> Value {
+    json!({
+        "type": "VideoPreference",
+        "width": width,
+        "height": height,
+        "fps": fps,
+        "videoCodec": "H264",
+        "colorSpaceFlags": 0,
+    })
+}
+
 pub fn message_handshake() -> Value {
     json!({
         "type": "Handshake",
@@ -139,7 +164,16 @@ pub fn generate_message(path: &str, data: Value) -> Value {
     })
 }
 
-pub fn startup_messages(max_bitrate_kbps: u32, width: u32, height: u32) -> Vec<Value> {
+pub fn startup_messages(
+    max_bitrate_kbps: u32,
+    width: u32,
+    height: u32,
+    video_fps: u32,
+) -> Vec<Value> {
+    // The server sizes its encoder from what we advertise, so the proactive
+    // cap applies here as well: asking for more than the server can encode
+    // in real time buys a queue, not a sharper picture.
+    let max_bitrate_kbps = effective_bitrate_kbps(max_bitrate_kbps);
     vec![
         generate_message(
             "/streaming/systemUi/configuration",
@@ -166,7 +200,7 @@ pub fn startup_messages(max_bitrate_kbps: u32, width: u32, height: u32) -> Vec<V
                 "supportsCustomResolution": true,
                 "supportsHevc": false,
                 "supportsHdr": false,
-                "supportsFps": 60,
+                "supportsFps": video_fps,
                 "maxWidth": width,
                 "maxHeight": height,
                 "maxBitrateKbps": max_bitrate_kbps,

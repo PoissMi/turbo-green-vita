@@ -1,5 +1,5 @@
 use crate::Stream;
-use crate::api::streaming::rtc::session::RtcSessionConfig;
+use crate::api::streaming::rtc::session::{RtcSessionConfig, effective_bitrate_kbps};
 use crate::api::streaming::rtc::worker::{RtcWorker, RtcWorkerProvider};
 use crate::api_xbox::streaming::rtc::protocol::XboxRtcProtocol;
 use crate::api_xbox::streaming::rtc::{AUDIO_PAYLOAD_TYPE, ROUTE_PROBE, STUN_SERVER, peer};
@@ -14,13 +14,19 @@ use rtc::peer_connection::sdp::RTCSessionDescription;
 struct XboxRtcWorkerProvider {
     stream: Stream,
     max_bitrate_kbps: u32,
+    video_fps: u32,
 }
 
 impl RtcWorkerProvider for XboxRtcWorkerProvider {
     type Protocol = XboxRtcProtocol;
 
     fn create_peer(&self) -> Result<(RTCPeerConnection, Self::Protocol)> {
-        peer::create(self.max_bitrate_kbps, STREAM_WIDTH, STREAM_HEIGHT)
+        peer::create(
+            self.max_bitrate_kbps,
+            STREAM_WIDTH,
+            STREAM_HEIGHT,
+            self.video_fps,
+        )
     }
 
     fn session_config(&self) -> RtcSessionConfig {
@@ -30,6 +36,7 @@ impl RtcWorkerProvider for XboxRtcWorkerProvider {
             audio_sample_rate: AUDIO_SAMPLE_RATE as u32,
             audio_payload_type: AUDIO_PAYLOAD_TYPE,
             max_video_bitrate_kbps: self.max_bitrate_kbps,
+            video_fps: self.video_fps,
             decoder: DecoderConfig {
                 decode_width: STREAM_WIDTH,
                 decode_height: STREAM_HEIGHT,
@@ -38,7 +45,10 @@ impl RtcWorkerProvider for XboxRtcWorkerProvider {
     }
 
     async fn exchange_sdp(&self, offer: &RTCSessionDescription) -> Result<String> {
-        let sdp = set_max_video_bitrate(&offer.sdp, self.max_bitrate_kbps);
+        let sdp = set_max_video_bitrate(
+            &offer.sdp,
+            effective_bitrate_kbps(self.max_bitrate_kbps),
+        );
         let answer = self.stream.send_sdp_offer(&sdp).await?;
         Ok(normalize_answer_ice_credentials(&answer))
     }
@@ -113,9 +123,10 @@ fn set_max_video_bitrate(sdp: &str, kbps: u32) -> String {
     lines.join("\n")
 }
 
-pub(crate) fn spawn(stream: Stream, max_bitrate_kbps: u32) -> Result<RtcWorker> {
+pub(crate) fn spawn(stream: Stream, max_bitrate_kbps: u32, video_fps: u32) -> Result<RtcWorker> {
     RtcWorker::spawn(XboxRtcWorkerProvider {
         stream,
         max_bitrate_kbps,
+        video_fps,
     })
 }

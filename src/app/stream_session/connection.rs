@@ -225,6 +225,7 @@ impl App {
                     title_id,
                     session.return_selected,
                     self.settings.max_bitrate.kbps(),
+                    self.settings.frame_rate.fps(),
                 ) {
                     Ok(streaming) => Ok(AppState::Streaming(streaming)),
                     Err(error) => {
