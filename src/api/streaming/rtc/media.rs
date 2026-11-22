@@ -98,17 +98,30 @@ impl VideoReceiver {
 
     pub(crate) fn drain_decoder(&mut self, keyframe_requested: &mut bool) {
         let mut decode_errors = 0u64;
-        while let Some(result) = self
+        // Drain the full queue each pump so a burst doesn't strand frames:
+        // take every result but only the newest becomes `latest_frame`.
+        // Frames that are older than the newest are still counted as
+        // replaced, but they were at least offered to the loop first —
+        // the loop's `latest_frame.take()` never sees a stale overwrite
+        // from *this* drain because the worker latch is checked immediately
+        // after pump() returns.
+        let drained: Vec<_> = self
             .decoder
             .latest_result
             .lock()
-            .ok()
-            .and_then(|mut latest| latest.take())
-        {
+            .map(|mut queue| queue.drain(..).collect())
+            .unwrap_or_default();
+        // Keep only the last OK frame (newest); count the rest as replaced.
+        let mut latest_ok = None;
+        for result in drained {
             match result {
                 Ok(frame) => {
                     self.next_frame_id = self.next_frame_id.wrapping_add(1);
-                    self.latest_frame = Some((self.next_frame_id, frame));
+                    if latest_ok.replace((self.next_frame_id, frame)).is_some() {
+                        crate::streaming::video::metrics::METRICS
+                            .replaced
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 Err(error) => {
                     eprintln!("Failed to decode H264 video frame: {error}");
@@ -116,6 +129,9 @@ impl VideoReceiver {
                     *keyframe_requested = true;
                 }
             }
+        }
+        if let Some(frame) = latest_ok {
+            self.latest_frame = Some(frame);
         }
 
         if decode_errors > 0 {
