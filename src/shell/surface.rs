@@ -170,10 +170,50 @@ impl VitaSurface {
         }
         metrics.gpu_wait_us.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
         let texture = &self.display_textures[target];
+        // DMA upload: the staging slots live in uncached CDRAM (the HW
+        // decoder needs NC memory). A CPU memcpy from NC memory runs at
+        // ~69 MB/s (~20ms for 720p NV12, measured). sceDmacMemcpy runs on
+        // the DMA controller and bypasses the CPU caches entirely.
+        // Y plane: width*height; UV plane: width*height/2 at uv_offset.
+        let layout_copy = layout;
         let start = Instant::now();
         let upload = output.with_frame(frame, |base| unsafe {
             use sdl2::sys::*;
-            SDL_UpdateNVTexture(texture.raw(), std::ptr::null(), base, layout.width as i32, base.add(layout.uv_offset as usize), layout.width as i32)
+            use std::os::raw::c_void;
+            // Lock the streaming texture to get its Y pointer (UV at +w*h).
+            let mut pixels: *mut c_void = std::ptr::null_mut();
+            let mut pitch: i32 = 0;
+            let lock_ret = SDL_LockTexture(texture.raw(), std::ptr::null(), &mut pixels, &mut pitch);
+            if lock_ret != 0 {
+                return lock_ret;
+            }
+            if pixels.is_null() {
+                let _ = SDL_UnlockTexture(texture.raw());
+                return -1;
+            }
+            let y_size = layout_copy.width as u32 * layout_copy.height as u32;
+            let uv_size = y_size / 2;
+            let tex_y = pixels as *mut u8;
+            let tex_uv = tex_y.add(y_size as usize);
+            let dmac_ret_y = vitasdk_sys::sceDmacMemcpy(
+                tex_y as *mut c_void,
+                base as *const c_void,
+                y_size,
+            );
+            if dmac_ret_y < 0 {
+                let _ = SDL_UnlockTexture(texture.raw());
+                return dmac_ret_y;
+            }
+            let dmac_ret_uv = vitasdk_sys::sceDmacMemcpy(
+                tex_uv as *mut c_void,
+                base.add(layout_copy.uv_offset as usize) as *const c_void,
+                uv_size,
+            );
+            let _ = SDL_UnlockTexture(texture.raw());
+            if dmac_ret_uv < 0 {
+                return dmac_ret_uv;
+            }
+            0
         });
         if let Some(result) = upload {
             anyhow::ensure!(result == 0, "NV12 upload failed: {}", sdl2::get_error());
@@ -185,10 +225,14 @@ impl VitaSurface {
             self.display_index = target;
             // Advance on success only: if the staging slot was recycled
             // underneath us (`with_frame` returned None) we retry the same
-            // frame_id next loop instead of silently dropping it.
+            // frame_id next loop instead of silently dropping it. Count the
+            // recycled-slot case so a silent drop can't masquerade as slow
+            // rendering.
             self.last_frame_id = frame_id;
             self.next_display_index = (target + 1) % DISPLAY_TEXTURE_COUNT;
             metrics.presented.fetch_add(1, Ordering::Relaxed);
+        } else {
+            metrics.slot_dropped.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -245,7 +289,8 @@ impl VitaSurface {
     pub fn present_video_only(&mut self, show_video: bool) -> Result<()> {
         self.draw_scene(show_video)?;
         if !self.cached_primitives.is_empty() {
-            let primitives: Vec<egui::ClippedPrimitive> = self.cached_primitives.clone();
+            // Clone so the painter borrow doesn't alias the cache.
+            let primitives = self.cached_primitives.clone();
             let ppp = self.cached_pixels_per_point;
             // Textures are already uploaded; pass an empty delta.
             let delta = egui::TexturesDelta::default();
@@ -257,7 +302,11 @@ impl VitaSurface {
                 &delta,
             )?;
         }
+        let start = Instant::now();
         self.canvas.present();
+        crate::streaming::video::metrics::METRICS
+            .present_us
+            .store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
         let context = SCENE_CAPTURE.with(|capture| capture.take()).filter(|context| !context.is_null());
         if self.source.is_some() {
             if let Some(context) = context {
@@ -291,7 +340,11 @@ impl VitaSurface {
             primitives,
             textures_delta,
         )?;
+        let start = Instant::now();
         self.canvas.present();
+        crate::streaming::video::metrics::METRICS
+            .present_us
+            .store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
         // SDL may end more than one GXM scene per present on Vita; the wrap
         // hook captures the last one. Record which display texture that
         // scene sampled so the next reuse of *that* texture waits on it —
