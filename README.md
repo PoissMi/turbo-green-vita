@@ -140,9 +140,10 @@ With the upload fixed, the client stopped being the bottleneck — but two
 problems remained, and both were found by measuring the pipeline instead
 of guessing at it. The HUD now reports the age of the frame on screen
 (`age`, first RTP packet to upload), the input's delay to the wire
-(`in-lag`), the real display flip rate and the worst gap between flips
-(`pres`, `gap`), the audio queue depth (`aud`) and the worst gap between
-data-channel flushes (`flush-gap`).
+(`in-lag`, `in-wire`), the real display flip rate and the worst gap between
+flips (`pres`, `gap`), the audio queue depth (`aud`), the worst gap between
+data-channel flushes (`flush-gap`), and the delay the server's own video
+timeline is running behind by (`srv`, `drift`).
 
 - **Late frames are repaired, not discarded (0.4.1).** The reassembler
   dropped the in-flight frame the moment a packet with the next timestamp
@@ -169,6 +170,34 @@ data-channel flushes (`flush-gap`).
   never make the picture older than it already was. On device: **unique
   frames per second 37 → 62**, with the worst-case frame age unchanged
   (48.2 → 45.6 ms).
+- **The input channel is reliable and ordered again (0.4.1).** A second delay
+  survived the freeze fix: after a few minutes of play the character stopped
+  keeping up with the button presses by roughly half a second, and it got
+  worse the longer the session ran and the higher the bitrate was. Every
+  client-side number was clean while it happened, and the new `srv`/`drift`
+  measurement showed the transport was clean too, so the delay had to be in
+  the input path. The backend refactor had silently rewritten the input data
+  channel as an unordered PR-SCTP stream with zero retransmissions, unlike
+  both the upstream client and the reference implementation. On such a stream
+  the peer must skip the chunks it never received with a forward-TSN, and
+  every chunk it fails to skip is a gap the following input waits behind — so
+  the delay grew over the session and a busier link made it worse. The
+  channel is reliable and ordered again, and the controller is refreshed every
+  16 ms instead of 50 ms, the cadence the reference client polls at.
+- **The input report carries a real uptime stamp (0.4.1).** The port wrote the
+  age of the packet into that field, which is always zero because a packet is
+  serialised right after it is created, so every report carried the same
+  stamp. The reference client fills it with its uptime (`performance.now()`),
+  and a stream of reports whose stamp never moves looks like a frozen client.
+- **The server's video delay is measured, and the bitrate estimate follows it
+  (0.4.1).** The frame age the HUD reports starts when a packet leaves the
+  socket buffer, so a queue growing in front of the client is invisible to
+  it: every frame looks fresh while the picture falls further behind reality.
+  The RTP timestamp is the server's capture time, so the gap between it and
+  our arrival clock is exactly that hidden delay. It is now reported as `srv`
+  and `drift`, and the REMB the server sizes its encoder from follows it: the
+  estimate backs off while the queue grows and climbs back towards the
+  setting in Settings when the path keeps up. The setting stays the ceiling.
 - **Deeper staging ring (0.4.1).** Three NV12 staging slots gave a decoded
   frame only ~50 ms of validity before the decoder recycled its buffer, and
   a slow upload meant the frame was thrown away (`slot` in the HUD). Five
