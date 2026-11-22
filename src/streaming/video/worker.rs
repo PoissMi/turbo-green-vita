@@ -259,6 +259,8 @@ fn decode_queued_access_unit(
                     generation: slot_generation,
                     layout,
                     visible,
+                    decoded_at: Instant::now(),
+                    handed_off_at: None,
                 }),
             );
         }

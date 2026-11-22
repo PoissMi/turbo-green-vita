@@ -108,6 +108,8 @@ pub struct DecodedFrame {
     generation: u64,
     pub(crate) layout: YuvLayout,
     pub(crate) visible: [u32; 4],
+    pub(crate) decoded_at: std::time::Instant,
+    pub(crate) handed_off_at: Option<std::time::Instant>,
 }
 
 #[derive(Clone, Copy)]

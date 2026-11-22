@@ -217,7 +217,14 @@ impl VitaSurface {
         });
         if let Some(result) = upload {
             anyhow::ensure!(result == 0, "NV12 upload failed: {}", sdl2::get_error());
-            metrics.upload_us.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+            let now = Instant::now();
+            metrics.upload_us.store(now.duration_since(start).as_micros() as u64, Ordering::Relaxed);
+            if let Some(handed_off_at) = frame.handed_off_at {
+                metrics.handoff_to_upload_max_us.fetch_max(
+                    now.duration_since(handed_off_at).as_micros() as u64,
+                    Ordering::Relaxed,
+                );
+            }
             let [x, y, w, h] = frame.visible;
             self.source = Some(sdl2::rect::Rect::new(x as i32, y as i32, w, h));
             self.video_width = w;
