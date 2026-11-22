@@ -322,10 +322,22 @@ async fn run_session<B: super::session::RtcSessionBackend>(
             send_lossy(&audio_tx, audio_packets);
         }
 
-        if let Some(frame) = session.video.latest_frame.take()
+        if let Some((id, mut frame)) = session.video.latest_frame.take()
             && let Ok(mut latest) = latest_frame.lock()
         {
-            *latest = Some(frame);
+            use crate::streaming::video::metrics::METRICS;
+            use std::sync::atomic::Ordering::Relaxed;
+
+            let now = Instant::now();
+            METRICS.decode_to_handoff_max_us.fetch_max(
+                now.duration_since(frame.decoded_at).as_micros() as u64,
+                Relaxed,
+            );
+            frame.handed_off_at = Some(now);
+            if latest.replace((id, frame)).is_some() {
+                METRICS.ui_overwrites.fetch_add(1, Relaxed);
+            }
+            METRICS.handoffs.fetch_add(1, Relaxed);
             frame_ready.notify_one();
         }
 

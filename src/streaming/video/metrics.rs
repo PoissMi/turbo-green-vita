@@ -16,6 +16,10 @@ pub(crate) struct VideoMetrics {
     pub(crate) skipped: AtomicU64,
     pub(crate) presented: AtomicU64,
     pub(crate) replaced: AtomicU64,
+    pub(crate) handoffs: AtomicU64,
+    pub(crate) ui_overwrites: AtomicU64,
+    pub(crate) decode_to_handoff_max_us: AtomicU64,
+    pub(crate) handoff_to_upload_max_us: AtomicU64,
     pub(crate) queue_full: AtomicU64,
     /// Frames that never made it to `sync_video_frame`'s upload because the
     /// staging slot was recycled underneath us (`with_frame` returned None).
@@ -38,6 +42,10 @@ pub(crate) static METRICS: VideoMetrics = VideoMetrics {
     skipped: AtomicU64::new(0),
     presented: AtomicU64::new(0),
     replaced: AtomicU64::new(0),
+    handoffs: AtomicU64::new(0),
+    ui_overwrites: AtomicU64::new(0),
+    decode_to_handoff_max_us: AtomicU64::new(0),
+    handoff_to_upload_max_us: AtomicU64::new(0),
     queue_full: AtomicU64::new(0),
     slot_dropped: AtomicU64::new(0),
     resyncs: AtomicU64::new(0),
@@ -50,7 +58,7 @@ pub fn video_performance_summary() -> String {
     let rtp_average = rtp_sum.checked_div(rtp_count).unwrap_or(0);
     let rtp_max = METRICS.rtp_assembly_max_us.swap(0, Ordering::Relaxed);
     format!(
-        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{}",
+        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us",
         METRICS.decoded.swap(0, Ordering::Relaxed),
         METRICS.presented.swap(0, Ordering::Relaxed),
         METRICS.decode_us.load(Ordering::Relaxed),
@@ -65,5 +73,9 @@ pub fn video_performance_summary() -> String {
         METRICS.slot_dropped.swap(0, Ordering::Relaxed),
         METRICS.resyncs.load(Ordering::Relaxed),
         METRICS.resets.load(Ordering::Relaxed),
+        METRICS.handoffs.swap(0, Ordering::Relaxed),
+        METRICS.ui_overwrites.swap(0, Ordering::Relaxed),
+        METRICS.decode_to_handoff_max_us.swap(0, Ordering::Relaxed),
+        METRICS.handoff_to_upload_max_us.swap(0, Ordering::Relaxed),
     )
 }
