@@ -269,6 +269,12 @@ pub async fn run(mut app: App) -> Result<()> {
             surface.present_video_only(true)?;
         }
         let frame_deadline = loop_started_at + TARGET_FRAME_TIME;
+        // Diagnostics: how long the loop's CPU work + blocking present took,
+        // vs the 16.7ms vsync window. pr/loop in the HUD.
+        crate::streaming::video::metrics::METRICS.loop_us.store(
+            loop_started_at.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         // While streaming, a decoded frame wakes the loop early instead of waiting out the
         // frame budget; the deadline still caps latency for UI/input when the stream stalls.
         let frame_ready = app
