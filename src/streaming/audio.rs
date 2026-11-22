@@ -8,8 +8,19 @@ pub const AUDIO_SAMPLE_RATE: i32 = 48_000;
 const AUDIO_CHANNELS: usize = 2;
 
 const AUDIO_BYTES_PER_SECOND: u32 = AUDIO_SAMPLE_RATE as u32 * AUDIO_CHANNELS as u32 * 2;
-const MAX_QUEUED_AUDIO_BYTES: u32 = AUDIO_BYTES_PER_SECOND * 240 / 1_000;
-const AUDIO_START_BUFFER_BYTES: u32 = AUDIO_BYTES_PER_SECOND * 80 / 1_000;
+/// Hard cap on the audio queued in the device.
+///
+/// The queue depth *is* the A/V desync: whatever sits in here is audio the
+/// player has already heard the video for. It used to be 240 ms, which is
+/// how the sound ended up almost a third of a second behind the picture.
+const MAX_QUEUED_AUDIO_BYTES: u32 = AUDIO_BYTES_PER_SECOND * 120 / 1_000;
+/// How much audio to buffer before starting playback.
+///
+/// This used to be 80 ms, which put the sound roughly a third of a second
+/// behind the picture (the video reaches the screen ~30 ms after it arrives).
+/// The brain anchors perceived latency on the sound, so this buffer was the
+/// largest remaining latency source in the client.
+const AUDIO_START_BUFFER_BYTES: u32 = AUDIO_BYTES_PER_SECOND * 25 / 1_000;
 const MAX_OPUS_FRAME_SAMPLES_PER_CHANNEL: usize = 5_760;
 const MAX_PENDING_OPUS_PACKETS: usize = 32;
 const MAX_PENDING_PCM_BUFFERS: usize = 8;
@@ -101,7 +112,9 @@ impl AudioRenderer {
         let desired = AudioSpecDesired {
             freq: Some(AUDIO_SAMPLE_RATE),
             channels: Some(AUDIO_CHANNELS as u8),
-            samples: Some(1024),
+            // 512 frames is 10.7 ms at 48 kHz. The previous 1024 frame
+            // buffer added another 10.7 ms of latency for no benefit.
+            samples: Some(512),
         };
         let queue = audio
             .open_queue(None, &desired)
@@ -149,6 +162,9 @@ impl AudioRenderer {
                         self.queue.pause();
                         self.queue.clear();
                         self.started = false;
+                        crate::streaming::video::metrics::METRICS
+                            .audio_resyncs
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     if let Err(error) = self.queue.queue_audio(&samples) {
                         eprintln!("Failed to queue SDL audio: {error}");
@@ -165,6 +181,19 @@ impl AudioRenderer {
                     break;
                 }
             }
+        }
+
+        // How much audio is queued in the device right now. Together with the
+        // RTP jitter buffer this is the audio side of the A/V desync: the
+        // video is ~20 ms old when it hits the screen, so a deep audio queue
+        // means the sound lags the picture by that much.
+        let queued_ms = (self.queue.size() * 1_000) / AUDIO_BYTES_PER_SECOND;
+        {
+            let metrics = &crate::streaming::video::metrics::METRICS;
+            let ordering = std::sync::atomic::Ordering::Relaxed;
+            metrics.audio_buffer_ms.fetch_max(queued_ms as u64, ordering);
+            metrics.audio_buffer_sum_ms.fetch_add(queued_ms as u64, ordering);
+            metrics.audio_buffer_count.fetch_add(1, ordering);
         }
     }
 

@@ -26,11 +26,12 @@ pub struct InputPacket {
     gamepad_frames: Vec<GamepadFrame>,
     pointer_frames: Vec<PointerFrame>,
     max_touchpoints: u8,
-    created_at: Instant,
+    /// Base of the uptime stamp written into every report.
+    started_at: Instant,
 }
 
 impl InputPacket {
-    pub fn new(sequence: u32) -> Self {
+    pub fn new(sequence: u32, started_at: Instant) -> Self {
         Self {
             report_type: ReportType::None as u16,
             total_size: 14,
@@ -38,12 +39,12 @@ impl InputPacket {
             gamepad_frames: Vec::new(),
             pointer_frames: Vec::new(),
             max_touchpoints: 0,
-            created_at: Instant::now(),
+            started_at,
         }
     }
 
-    pub fn client_metadata(sequence: u32, max_touchpoints: u8) -> Self {
-        let mut packet = Self::new(sequence);
+    pub fn client_metadata(sequence: u32, max_touchpoints: u8, started_at: Instant) -> Self {
+        let mut packet = Self::new(sequence, started_at);
         packet.report_type = ReportType::ClientMetadata as u16;
         packet.total_size = 15;
         packet.max_touchpoints = max_touchpoints;
@@ -73,7 +74,11 @@ impl InputPacket {
         let mut bytes = Vec::with_capacity(self.total_size);
         push_le(&mut bytes, self.report_type.to_le_bytes());
         push_le(&mut bytes, self.sequence.to_le_bytes());
-        bytes.extend_from_slice(&(self.created_at.elapsed().as_secs_f64() * 1000.0).to_le_bytes());
+        // Uptime stamp in milliseconds, the same shape the reference client
+        // sends (greenlight writes `performance.now()`). It has to advance:
+        // the server reads it to tell a live client from a stalled one, and a
+        // report that always carries the same value looks frozen.
+        bytes.extend_from_slice(&(self.started_at.elapsed().as_secs_f64() * 1000.0).to_le_bytes());
 
         if !self.gamepad_frames.is_empty() {
             self.write_gamepads(&mut bytes);
@@ -173,11 +178,24 @@ fn push_le<const N: usize>(bytes: &mut Vec<u8>, raw: [u8; N]) {
 }
 
 /// Batches queued frames into [`InputPacket`]s, one wire packet per send.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct InputQueue {
     sequence: u32,
     gamepads: Vec<GamepadFrame>,
     pointers: Vec<PointerFrame>,
+    /// Base for the uptime stamp in every report.
+    started_at: Instant,
+}
+
+impl Default for InputQueue {
+    fn default() -> Self {
+        Self {
+            sequence: 0,
+            gamepads: Vec::new(),
+            pointers: Vec::new(),
+            started_at: Instant::now(),
+        }
+    }
 }
 
 impl InputQueue {
@@ -200,7 +218,8 @@ impl InputQueue {
     }
 
     pub fn client_metadata_packet(&mut self, max_touchpoints: u8) -> Vec<u8> {
-        InputPacket::client_metadata(self.next_sequence(), max_touchpoints).to_bytes()
+        InputPacket::client_metadata(self.next_sequence(), max_touchpoints, self.started_at)
+            .to_bytes()
     }
 
     fn check_queue_and_packet(&mut self, force_send: bool) -> Option<Vec<u8>> {
@@ -209,7 +228,7 @@ impl InputQueue {
     }
 
     fn drain_packet(&mut self) -> Vec<u8> {
-        let mut packet = InputPacket::new(self.next_sequence());
+        let mut packet = InputPacket::new(self.next_sequence(), self.started_at);
         packet.set_data(
             std::mem::take(&mut self.gamepads),
             std::mem::take(&mut self.pointers),

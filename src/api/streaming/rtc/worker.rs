@@ -16,10 +16,15 @@ use std::time::{Duration, Instant};
 const PUMP_SLEEP: Duration = Duration::from_millis(1);
 const PUMP_ERROR_SLEEP: Duration = Duration::from_millis(100);
 const GAMEPAD_PULSE_DURATION: Duration = Duration::from_millis(100);
-const GAMEPAD_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
+/// How often the controller state is refreshed even when nothing changes.
+/// The reference client polls the pad every 16 ms and reports that often, so
+/// the server always has a recent state to work with.
+const GAMEPAD_REFRESH_INTERVAL: Duration = Duration::from_millis(16);
 const MAX_PENDING_COMMANDS: usize = 16;
 const MAX_PENDING_EVENTS: usize = 32;
 const MAX_PENDING_AUDIO_BATCHES: usize = 16;
+/// Decoded frames waiting for the UI to display them, one per display frame.
+const UI_FRAME_QUEUE_DEPTH: usize = 4;
 const SDP_NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub(crate) trait RtcWorkerProvider: Send + 'static {
@@ -46,13 +51,16 @@ enum RtcWorkerCommand {
 
 struct SampledGamepadFrame {
     frame: GamepadFrame,
+    /// When the controller was sampled, so the HUD can report how long an
+    /// input waited before it was put on the wire.
+    sampled_at: Instant,
 }
 
 pub struct RtcWorker {
     commands_tx: SyncSender<RtcWorkerCommand>,
     pub(crate) events_rx: Receiver<RtcWorkerEvent>,
     pub(crate) audio_rx: Receiver<Vec<Bytes>>,
-    pub(crate) latest_frame: Arc<Mutex<Option<(u64, DecodedFrame)>>>,
+    pub(crate) latest_frames: Arc<Mutex<VecDeque<(u64, DecodedFrame)>>>,
     pub(crate) frame_ready: Arc<tokio::sync::Notify>,
     latest_gamepad: Arc<Mutex<Option<SampledGamepadFrame>>>,
     gamepad_pulses: Arc<Mutex<VecDeque<GamepadFrame>>>,
@@ -64,8 +72,8 @@ impl RtcWorker {
         let (commands_tx, commands_rx) = sync_channel(MAX_PENDING_COMMANDS);
         let (events_tx, events_rx) = sync_channel(MAX_PENDING_EVENTS);
         let (audio_tx, audio_rx) = sync_channel(MAX_PENDING_AUDIO_BATCHES);
-        let latest_frame = Arc::new(Mutex::new(None));
-        let worker_latest_frame = Arc::clone(&latest_frame);
+        let latest_frames = Arc::new(Mutex::new(VecDeque::new()));
+        let worker_latest_frames = Arc::clone(&latest_frames);
         let frame_ready = Arc::new(tokio::sync::Notify::new());
         let worker_frame_ready = Arc::clone(&frame_ready);
         let latest_gamepad = Arc::new(Mutex::new(None));
@@ -85,7 +93,7 @@ impl RtcWorker {
                         commands_rx,
                         events_tx.clone(),
                         audio_tx,
-                        worker_latest_frame,
+                        worker_latest_frames,
                         worker_frame_ready,
                         worker_latest_gamepad,
                         worker_gamepad_pulses,
@@ -113,7 +121,7 @@ impl RtcWorker {
             commands_tx,
             events_rx,
             audio_rx,
-            latest_frame,
+            latest_frames,
             frame_ready,
             latest_gamepad,
             gamepad_pulses,
@@ -130,7 +138,10 @@ impl RtcWorker {
 
     pub fn send_gamepad_frame(&self, frame: GamepadFrame) {
         if let Ok(mut latest) = self.latest_gamepad.lock() {
-            *latest = Some(SampledGamepadFrame { frame });
+            *latest = Some(SampledGamepadFrame {
+                frame,
+                sampled_at: Instant::now(),
+            });
         }
     }
 
@@ -156,7 +167,7 @@ fn run_worker_thread<P: RtcWorkerProvider>(
     commands_rx: Receiver<RtcWorkerCommand>,
     events_tx: SyncSender<RtcWorkerEvent>,
     audio_tx: SyncSender<Vec<Bytes>>,
-    latest_frame: Arc<Mutex<Option<(u64, DecodedFrame)>>>,
+    latest_frames: Arc<Mutex<VecDeque<(u64, DecodedFrame)>>>,
     frame_ready: Arc<tokio::sync::Notify>,
     latest_gamepad: Arc<Mutex<Option<SampledGamepadFrame>>>,
     gamepad_pulses: Arc<Mutex<VecDeque<GamepadFrame>>>,
@@ -193,7 +204,7 @@ fn run_worker_thread<P: RtcWorkerProvider>(
             commands_rx,
             events_tx,
             audio_tx,
-            latest_frame,
+            latest_frames,
             frame_ready,
             latest_gamepad,
             gamepad_pulses,
@@ -230,7 +241,7 @@ async fn run_session<B: super::session::RtcSessionBackend>(
     commands_rx: Receiver<RtcWorkerCommand>,
     events_tx: SyncSender<RtcWorkerEvent>,
     audio_tx: SyncSender<Vec<Bytes>>,
-    latest_frame: Arc<Mutex<Option<(u64, DecodedFrame)>>>,
+    latest_frames: Arc<Mutex<VecDeque<(u64, DecodedFrame)>>>,
     frame_ready: Arc<tokio::sync::Notify>,
     latest_gamepad: Arc<Mutex<Option<SampledGamepadFrame>>>,
     gamepad_pulses: Arc<Mutex<VecDeque<GamepadFrame>>>,
@@ -267,11 +278,13 @@ async fn run_session<B: super::session::RtcSessionBackend>(
                 // is temporarily suppressed (for example, until Confirm is released).
                 let sampled = latest.unwrap_or_else(|| SampledGamepadFrame {
                     frame: GamepadFrame::default(),
+                    sampled_at: Instant::now(),
                 });
                 send_sampled_gamepad_frame(&mut session, sampled, &mut last_gamepad_sent, true);
             } else if pulse_started || latest.is_some() {
                 let mut sampled = latest.unwrap_or_else(|| SampledGamepadFrame {
                     frame: GamepadFrame::default(),
+                    sampled_at: Instant::now(),
                 });
                 // Guide/Nexus is currently the only pulsed input. Keep it asserted while normal
                 // gamepad frames continue to flow instead of immediately overwriting the press.
@@ -322,23 +335,32 @@ async fn run_session<B: super::session::RtcSessionBackend>(
             send_lossy(&audio_tx, audio_packets);
         }
 
-        if let Some((id, mut frame)) = session.video.latest_frame.take()
-            && let Ok(mut latest) = latest_frame.lock()
-        {
-            use crate::streaming::video::metrics::METRICS;
-            use std::sync::atomic::Ordering::Relaxed;
+        // Hand every decoded frame to the UI, oldest first. The display
+        // flips faster than the source produces frames, so the UI can show
+        // one per flip instead of only the newest of each burst.
+        let mut drained = VecDeque::new();
+        std::mem::swap(&mut session.video.latest_frames, &mut drained);
+        if !drained.is_empty() {
+            if let Ok(mut latest) = latest_frames.lock() {
+                use crate::streaming::video::metrics::METRICS;
+                use std::sync::atomic::Ordering::Relaxed;
 
-            let now = Instant::now();
-            METRICS.decode_to_handoff_max_us.fetch_max(
-                now.duration_since(frame.decoded_at).as_micros() as u64,
-                Relaxed,
-            );
-            frame.handed_off_at = Some(now);
-            if latest.replace((id, frame)).is_some() {
-                METRICS.ui_overwrites.fetch_add(1, Relaxed);
+                for (id, mut frame) in drained {
+                    let now = Instant::now();
+                    METRICS.decode_to_handoff_max_us.fetch_max(
+                        now.duration_since(frame.decoded_at).as_micros() as u64,
+                        Relaxed,
+                    );
+                    frame.handed_off_at = Some(now);
+                    latest.push_back((id, frame));
+                    METRICS.handoffs.fetch_add(1, Relaxed);
+                    while latest.len() > UI_FRAME_QUEUE_DEPTH {
+                        latest.pop_front();
+                        METRICS.ui_overwrites.fetch_add(1, Relaxed);
+                    }
+                }
+                frame_ready.notify_one();
             }
-            METRICS.handoffs.fetch_add(1, Relaxed);
-            frame_ready.notify_one();
         }
 
         if session.status != last_status || session.connection_state != last_connection_state {
@@ -388,6 +410,19 @@ fn send_sampled_gamepad_frame<B: super::session::RtcSessionBackend>(
     if !force && unchanged_and_fresh {
         return;
     }
+
+    // How long the sampled input waited before it was handed to the peer
+    // connection (and from there onto the wire).
+    let lag_us = now.duration_since(sampled.sampled_at).as_micros() as u64;
+    crate::streaming::video::metrics::METRICS
+        .input_lag_max_us
+        .fetch_max(lag_us, std::sync::atomic::Ordering::Relaxed);
+    crate::streaming::video::metrics::METRICS
+        .input_lag_sum_us
+        .fetch_add(lag_us, std::sync::atomic::Ordering::Relaxed);
+    crate::streaming::video::metrics::METRICS
+        .input_lag_count
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     if session
         .backend

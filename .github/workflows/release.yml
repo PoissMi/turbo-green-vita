@@ -97,6 +97,8 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Turbo GreenVita ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
-          body_path: docs/releases/v0.4.0.md
+          # The release notes are picked by version, so the description that
+          # ships with a release is always the one written for it.
+          body_path: docs/releases/${{ steps.version.outputs.version }}.md
           generate_release_notes: false
           files: target/armv7-sony-vita-newlibeabihf/release/turbo-green-vita.vpk

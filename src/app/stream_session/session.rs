@@ -79,6 +79,13 @@ impl StreamingSession {
         self.backend.direct_video_output()
     }
 
+    pub(crate) fn pick_up_latest_video_frame(&mut self) {
+        if let Some((frame_id, frame)) = self.backend.take_latest_frame() {
+            self.latest_video_frame = Some(frame_id);
+            self.current_video_frame = Some(frame);
+        }
+    }
+
     pub(crate) fn frame_ready(&self) -> Arc<tokio::sync::Notify> {
         self.backend.frame_ready()
     }
@@ -136,11 +143,6 @@ impl StreamingSession {
         }
         while let Some(mut packets) = self.backend.try_recv_audio_packets() {
             self.pending_audio_packets.append(&mut packets);
-        }
-
-        if let Some((frame_id, frame)) = self.backend.take_latest_frame() {
-            self.latest_video_frame = Some(frame_id);
-            self.current_video_frame = Some(frame);
         }
 
         let mut closed = false;

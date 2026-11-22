@@ -9,8 +9,9 @@ use rtc::rtp::codec::h264::H264Packet;
 use rtc::rtp::codec::opus::OpusPacket;
 use rtc::rtp::packetizer::Depacketizer;
 use rtc_media::io::sample_builder::SampleBuilder;
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const MAX_PENDING_AUDIO_PACKETS: usize = 32;
 const MAX_H264_ACCESS_UNIT_BYTES: usize = 2 * 1024 * 1024;
@@ -18,6 +19,13 @@ const VIDEO_RTP_CLOCK_RATE: u32 = 90_000;
 const AUDIO_MAX_LATE_PACKETS: u16 = 32;
 const LOW_FPS_DAMAGE_LIMIT: u8 = 8;
 const HIGH_FPS_DAMAGE_LIMIT: u8 = 3;
+/// Frames kept in the reassembly queue while the head frame waits for its
+/// missing packets.
+const MAX_REORDER_FRAMES: usize = 3;
+/// How long an incomplete frame may wait for a retransmitted packet before it
+/// is abandoned. A Wi-Fi round trip is 10-40 ms, so 120 ms is generous while
+/// still bounding how stale the pipeline can become.
+const REPAIR_GRACE: Duration = Duration::from_millis(120);
 
 #[derive(Default)]
 pub(super) struct VideoSampleStats {
@@ -37,8 +45,12 @@ pub(super) struct AudioRtp {
 impl AudioRtp {
     pub(super) fn new(sample_rate: u32, payload_type: u8) -> Self {
         Self {
+            // The jitter buffer used to hold 80 ms of audio, which is 80 ms
+            // the sound lags the picture by before the device buffer is even
+            // counted. The video path measures sub-millisecond packet
+            // reordering, so 30 ms is still generous slack.
             samples: SampleBuilder::new(AUDIO_MAX_LATE_PACKETS, OpusPacket, sample_rate)
-                .with_max_time_delay(std::time::Duration::from_millis(80)),
+                .with_max_time_delay(Duration::from_millis(30)),
             payload_type,
         }
     }
@@ -60,15 +72,32 @@ impl AudioRtp {
 
 pub(super) struct VideoRtp {
     depacketizer: H264Packet,
-    pending: Option<PendingVideoFrame>,
+    /// Frames being assembled, oldest first.
+    ///
+    /// A second entry means the head frame is still missing packets. That is
+    /// not necessarily damage: on a busy link the tail of a frame can arrive
+    /// after the head of the next frame. The head frame is kept so the late
+    /// (or retransmitted) packets can complete it *in order*; a frame that is
+    /// dropped breaks the H.264 reference chain and forces a keyframe, which
+    /// saturates the 5 Mbps link and stalls the whole stream.
+    frames: VecDeque<PendingVideoFrame>,
     next_sequence: Option<u16>,
     last_frame_timestamp: Option<u32>,
     source_frame_duration_us: Option<u64>,
     damage_score: u8,
+    /// Set when the current receive() call damaged a frame, so a successful
+    /// frame in the same call does not mask the damage.
+    damaged_this_call: bool,
     stream_too_large: bool,
     waiting_for_keyframe: bool,
     max_width: u32,
     max_height: u32,
+    /// Anchor for the server-timeline measurement: the first frame's RTP
+    /// timestamp and the instant its first packet arrived.
+    timeline_origin: Option<(u32, Instant)>,
+    /// One sample per second of (arrival, RTP timestamp) so the offset can be
+    /// compared against a minute-old sample.
+    timeline_samples: VecDeque<(Instant, u32)>,
 }
 
 struct PendingVideoFrame {
@@ -127,8 +156,12 @@ impl PendingVideoFrame {
 
     /// Sequence numbers never seen for this frame (gaps below the marker),
     /// limited to the transport NACK bitmap window (16 packets).
-    fn missing_sequences(&self) -> Vec<u16> {
-        let Some(marker) = self.marker_sequence() else {
+    ///
+    /// `presumed_marker` covers the case where the marker packet itself was
+    /// lost: the next frame's first sequence minus one is the best guess for
+    /// where this frame ends.
+    fn missing_sequences(&self, presumed_marker: Option<u16>) -> Vec<u16> {
+        let Some(marker) = self.marker_sequence().or(presumed_marker) else {
             return Vec::new();
         };
         // Walk back from marker to first received packet's neighbourhood.
@@ -210,15 +243,18 @@ impl VideoRtp {
     pub(super) fn new(max_width: u32, max_height: u32) -> Self {
         Self {
             depacketizer: H264Packet::default(),
-            pending: None,
+            frames: VecDeque::new(),
             next_sequence: None,
             last_frame_timestamp: None,
             source_frame_duration_us: None,
             damage_score: 0,
+            damaged_this_call: false,
             stream_too_large: false,
             waiting_for_keyframe: false,
             max_width,
             max_height,
+            timeline_origin: None,
+            timeline_samples: VecDeque::new(),
         }
     }
 
@@ -237,7 +273,7 @@ impl VideoRtp {
         keyframe_requested: &mut bool,
     ) -> VideoSampleStats {
         let mut stats = VideoSampleStats::default();
-        let mut frame_was_damaged = false;
+        self.damaged_this_call = false;
         if packet.payload.is_empty() {
             if self.next_sequence == Some(packet.header.sequence_number) {
                 self.next_sequence = Some(packet.header.sequence_number.wrapping_add(1));
@@ -246,67 +282,213 @@ impl VideoRtp {
         }
 
         let packet_timestamp = packet.header.timestamp;
-        if let Some(pending) = &self.pending
-            && pending.timestamp != packet_timestamp
+        let packet_sequence = packet.header.sequence_number;
+        // Route the packet to the frame it belongs to. A late or retransmitted
+        // packet carries its original timestamp, so it lands back in the frame
+        // that is still waiting for it.
+        if let Some(frame) = self
+            .frames
+            .iter_mut()
+            .find(|frame| frame.timestamp == packet_timestamp)
         {
-            if !timestamp_is_newer(packet_timestamp, pending.timestamp) {
+            frame.insert_sorted(packet);
+        } else {
+            let starts_new_frame = self
+                .frames
+                .back()
+                .is_none_or(|back| timestamp_is_newer(packet_timestamp, back.timestamp));
+            if !starts_new_frame {
+                // Belongs to a frame that was already submitted or abandoned.
                 return stats;
             }
-            if let Some(incomplete) = self.pending.take() {
-                let missing = incomplete.missing_sequences();
-                if !missing.is_empty() {
-                    // Send NACK for the gaps before discarding the frame:
-                    // a retransmitted packet can still complete it, and the
-                    // damage counter stays honest about the gaps.
-                    stats.nack_sequence_numbers.extend(missing);
-                }
-                self.next_sequence = incomplete
-                    .marker_sequence()
-                    .map(|sequence| sequence.wrapping_add(1));
-                self.depacketizer = H264Packet::default();
-                *keyframe_requested = true;
-                self.record_damage(worker);
-                frame_was_damaged = true;
-                stats.dropped = stats.dropped.saturating_add(1);
-            }
-        }
-        if self.pending.is_none() {
-            if self
-                .last_frame_timestamp
-                .is_some_and(|last| !timestamp_is_newer(packet_timestamp, last))
+            if self.frames.is_empty()
+                && self
+                    .last_frame_timestamp
+                    .is_some_and(|last| !timestamp_is_newer(packet_timestamp, last))
             {
                 return stats;
             }
-            self.pending = Some(PendingVideoFrame::new(packet));
-        } else if let Some(pending) = &mut self.pending {
-            pending.insert_sorted(packet);
+            // A newer frame started while the head frame is still missing
+            // packets. NACK the gaps right away so the retransmission can
+            // complete the head frame in order.
+            if let Some(head) = self.frames.front() {
+                let presumed_marker = packet_sequence.wrapping_sub(1);
+                let missing = head.missing_sequences(Some(presumed_marker));
+                if !missing.is_empty() {
+                    stats.nack_sequence_numbers.extend(missing);
+                }
+            }
+            if self.frames.len() >= MAX_REORDER_FRAMES {
+                self.abandon_head(keyframe_requested, &mut stats);
+            }
+            self.frames.push_back(PendingVideoFrame::new(packet));
         }
 
-        let assembly = self
-            .pending
-            .as_ref()
-            .map(|pending| pending.assemble(&mut self.depacketizer, self.next_sequence));
-        let Some(assembly) = assembly else {
-            return stats;
-        };
-        let (data, marker_sequence) = match assembly {
-            FrameAssembly::Pending => return stats,
-            FrameAssembly::Invalid => {
-                self.pending = None;
-                self.next_sequence = None;
-                *keyframe_requested = true;
-                self.record_damage(worker);
-                stats.dropped = stats.dropped.saturating_add(1);
-                return stats;
+        self.drain_frames(worker, keyframe_requested, &mut stats);
+        stats
+    }
+
+    /// Submits every complete frame and gives up on frames that waited too
+    /// long for their missing packets.
+    fn drain_frames(
+        &mut self,
+        worker: &VideoDecodeWorker,
+        keyframe_requested: &mut bool,
+        stats: &mut VideoSampleStats,
+    ) {
+        loop {
+            self.submit_ready_frames(worker, keyframe_requested, stats);
+            let expired = self
+                .frames
+                .front()
+                .is_some_and(|head| head.first_packet_at.elapsed() > REPAIR_GRACE);
+            if !expired {
+                return;
             }
-            FrameAssembly::Complete {
-                data,
-                marker_sequence,
-            } => (data, marker_sequence),
+            self.abandon_head(keyframe_requested, stats);
+        }
+    }
+
+    /// Submits frames that are complete, oldest first. A frame that is still
+    /// missing packets holds back the frames behind it: an H.264 P-frame
+    /// cannot be decoded before its reference frame.
+    fn submit_ready_frames(
+        &mut self,
+        worker: &VideoDecodeWorker,
+        keyframe_requested: &mut bool,
+        stats: &mut VideoSampleStats,
+    ) {
+        while let Some(frame) = self.frames.pop_front() {
+            let assembly = frame.assemble(&mut self.depacketizer, self.next_sequence);
+            match assembly {
+                FrameAssembly::Pending => {
+                    self.frames.push_front(frame);
+                    return;
+                }
+                FrameAssembly::Invalid => {
+                    self.depacketizer = H264Packet::default();
+                    self.next_sequence = None;
+                    *keyframe_requested = true;
+                    self.record_damage();
+                    self.damaged_this_call = true;
+                    stats.dropped = stats.dropped.saturating_add(1);
+                }
+                FrameAssembly::Complete {
+                    data,
+                    marker_sequence,
+                } => {
+                    self.submit_completed(
+                        frame,
+                        data,
+                        marker_sequence,
+                        worker,
+                        keyframe_requested,
+                        stats,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Drops the oldest incomplete frame after its repair window expired.
+    fn abandon_head(
+        &mut self,
+        keyframe_requested: &mut bool,
+        stats: &mut VideoSampleStats,
+    ) {
+        let Some(frame) = self.frames.pop_front() else {
+            return;
         };
-        let completed = self.pending.take().expect("assembled pending video frame");
+        let missing = frame.missing_sequences(None);
+        if !missing.is_empty() {
+            stats.nack_sequence_numbers.extend(missing);
+        }
+        self.next_sequence = frame.marker_sequence().map(|seq| seq.wrapping_add(1));
+        self.depacketizer = H264Packet::default();
+        // Only escalate to a keyframe request once the damage score trips: a
+        // keyframe is large and saturates the 5 Mbps link, so asking for one
+        // per damaged frame is what turns a single lost packet into a stall.
+        if self.record_damage() {
+            *keyframe_requested = true;
+        }
+        self.damaged_this_call = true;
+        stats.dropped = stats.dropped.saturating_add(1);
+    }
+
+    /// Measures how far the server's video timeline lags our wall clock.
+    ///
+    /// The frame age the HUD reports starts when a packet leaves the socket
+    /// buffer, so a queue that grows in front of the client - the server's
+    /// send path, or the network in between - is invisible there: every frame
+    /// looks "fresh" by the time we see it while the picture itself falls
+    /// further and further behind reality. The RTP timestamp is the server's
+    /// capture time, so the gap between it and our arrival clock is exactly
+    /// that hidden delay. Only its *change* over time matters; the absolute
+    /// value carries the network delay.
+    fn record_timeline(&mut self, rtp_timestamp: u32, arrived_at: Instant) {
+        let Some((origin_ts, origin_wall)) = self.timeline_origin else {
+            self.timeline_origin = Some((rtp_timestamp, arrived_at));
+            return;
+        };
+        let offset_us =
+            Self::timeline_offset_us(origin_ts, origin_wall, rtp_timestamp, arrived_at);
+        crate::streaming::video::metrics::METRICS
+            .server_offset_us
+            .store(offset_us, Ordering::Relaxed);
+
+        // One sample per second is enough to see a queue that grows over
+        // minutes, and it keeps the comparison below free of packet jitter.
+        let due = self
+            .timeline_samples
+            .back()
+            .is_none_or(|(last_at, _)| arrived_at.duration_since(*last_at) >= Duration::from_secs(1));
+        if !due {
+            return;
+        }
+        self.timeline_samples.push_back((arrived_at, rtp_timestamp));
+        while self.timeline_samples.len() > 130 {
+            self.timeline_samples.pop_front();
+        }
+        // Compare against the sample from about a minute ago: a positive
+        // drift means the video is arriving later and later.
+        if let Some((at, ts)) = self
+            .timeline_samples
+            .iter()
+            .find(|(at, _)| arrived_at.duration_since(*at) >= Duration::from_secs(58))
+        {
+            let previous = Self::timeline_offset_us(origin_ts, origin_wall, *ts, *at);
+            crate::streaming::video::metrics::METRICS
+                .server_drift_us
+                .store(offset_us - previous, Ordering::Relaxed);
+        }
+    }
+
+    fn timeline_offset_us(
+        origin_ts: u32,
+        origin_wall: Instant,
+        rtp_timestamp: u32,
+        arrived_at: Instant,
+    ) -> i64 {
+        let rtp_delta_us = rtp_timestamp.wrapping_sub(origin_ts) as i64 * 1_000_000
+            / i64::from(VIDEO_RTP_CLOCK_RATE);
+        let wall_delta_us = arrived_at.duration_since(origin_wall).as_micros() as i64;
+        wall_delta_us - rtp_delta_us
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_completed(
+        &mut self,
+        completed: PendingVideoFrame,
+        data: Vec<u8>,
+        marker_sequence: u16,
+        worker: &VideoDecodeWorker,
+        keyframe_requested: &mut bool,
+        stats: &mut VideoSampleStats,
+    ) {
         // Record both average and worst-case RTP assembly time for the stream HUD.
         let assembly_us = completed.first_packet_at.elapsed().as_micros() as u64;
+        // How late this frame is compared to the server's own timeline.
+        self.record_timeline(completed.timestamp, completed.first_packet_at);
         crate::streaming::video::metrics::METRICS
             .rtp_assembly_sum_us
             .fetch_add(assembly_us, Ordering::Relaxed);
@@ -349,14 +531,14 @@ impl VideoRtp {
             }
             self.waiting_for_keyframe = true;
             stats.dropped = stats.dropped.saturating_add(1);
-            return stats;
+            return;
         }
         if self.stream_too_large {
             if unit.resolution.is_none() || !unit.has_idr {
                 *keyframe_requested = true;
                 self.waiting_for_keyframe = true;
                 stats.dropped = stats.dropped.saturating_add(1);
-                return stats;
+                return;
             }
             self.stream_too_large = false;
         }
@@ -364,26 +546,36 @@ impl VideoRtp {
             // Later keyframes may contain only IDR; AVCDEC retains SPS/PPS across resyncs.
             if !unit.has_idr {
                 *keyframe_requested = true;
+                self.waiting_for_keyframe = true;
                 stats.dropped = stats.dropped.saturating_add(1);
-                return stats;
+                return;
             }
             self.waiting_for_keyframe = false;
             self.damage_score = 0;
-        } else if !frame_was_damaged {
+        } else if !self.damaged_this_call {
             self.damage_score = self.damage_score.saturating_sub(1);
         }
 
-        if !worker.submit_access_unit(data, self.source_frame_duration_us) {
+        if !worker.submit_access_unit(
+            data,
+            self.source_frame_duration_us,
+            completed.first_packet_at,
+        ) {
             eprintln!("Video decoder queue is full; continuing while requesting a keyframe");
             *keyframe_requested = true;
             stats.dropped = stats.dropped.saturating_add(1);
         }
-        stats
     }
 
-    fn record_damage(&mut self, worker: &VideoDecodeWorker) {
+    /// Bumps the damage score. Returns true when it trips, i.e. when a
+    /// keyframe request is warranted.
+    ///
+    /// The decoder is deliberately left running: it conceals the missing
+    /// reference and keeps producing pictures, so the display keeps updating
+    /// instead of freezing until a keyframe arrives.
+    fn record_damage(&mut self) -> bool {
         if self.waiting_for_keyframe {
-            return;
+            return false;
         }
 
         self.damage_score = self.damage_score.saturating_add(1);
@@ -403,12 +595,11 @@ impl VideoRtp {
                     / 30) as u8
         };
         if self.damage_score < damage_limit {
-            return;
+            return false;
         }
 
-        worker.begin_resync();
-        self.waiting_for_keyframe = true;
         self.damage_score = 0;
+        true
     }
 }
 

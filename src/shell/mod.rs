@@ -208,8 +208,6 @@ pub async fn run(mut app: App) -> Result<()> {
         if let Some(streaming) = app.state.streaming_mut() {
             audio_renderer.submit_packets(streaming.take_audio_packets());
         }
-        surface.sync_video_frame(app.state.streaming())?;
-
         // --- Overlay throttle -------------------------------------------------
         // While streaming unpaused, the only egui content is the transient
         // "hold back to pause" hint (2s + 1s fade at stream start), an
@@ -257,15 +255,17 @@ pub async fn run(mut app: App) -> Result<()> {
                 app.handle_command(command).await?;
             }
 
-            surface.draw_scene(matches!(&app.state, AppState::Streaming(_)))?;
             let clipped_primitives =
                 egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+            sync_latest_video(&mut app, &mut surface)?;
+            surface.draw_scene(matches!(&app.state, AppState::Streaming(_)))?;
             surface.paint_egui(
                 full_output.pixels_per_point,
                 &clipped_primitives,
                 &full_output.textures_delta,
             )?;
         } else {
+            sync_latest_video(&mut app, &mut surface)?;
             surface.present_video_only(true)?;
         }
         let frame_deadline = loop_started_at + TARGET_FRAME_TIME;
@@ -275,8 +275,7 @@ pub async fn run(mut app: App) -> Result<()> {
             loop_started_at.elapsed().as_micros() as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
-        // While streaming, a decoded frame wakes the loop early instead of waiting out the
-        // frame budget; the deadline still caps latency for UI/input when the stream stalls.
+        // A frame-ready wake can prompt input polling, but never advances presentation.
         let frame_ready = app
             .state
             .streaming()
@@ -313,6 +312,13 @@ pub async fn run(mut app: App) -> Result<()> {
             tokio::task::yield_now().await;
         }
     }
+}
+
+fn sync_latest_video(app: &mut App, surface: &mut VitaSurface) -> Result<()> {
+    if let Some(streaming) = app.state.streaming_mut() {
+        streaming.pick_up_latest_video_frame();
+    }
+    surface.sync_video_frame(app.state.streaming())
 }
 
 fn send_stream_gamepad_state(

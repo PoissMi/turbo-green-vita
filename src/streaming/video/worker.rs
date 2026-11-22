@@ -22,6 +22,9 @@ const MAX_PENDING_ACCESS_UNITS: usize = 6;
 struct QueuedAccessUnit {
     data: Vec<u8>,
     queued_at: Instant,
+    /// When the first RTP packet of this frame arrived on the wire. Carried
+    /// through decode so the HUD can report true end-to-end frame age.
+    arrived_at: Instant,
     generation: u64,
 }
 
@@ -83,7 +86,12 @@ impl VideoDecodeWorker {
         })
     }
 
-    pub fn submit_access_unit(&self, data: Vec<u8>, source_frame_duration_us: Option<u64>) -> bool {
+    pub fn submit_access_unit(
+        &self,
+        data: Vec<u8>,
+        source_frame_duration_us: Option<u64>,
+        arrived_at: Instant,
+    ) -> bool {
         let source_fps = source_frame_duration_us
             .filter(|duration| *duration > 0)
             .map(|duration| 1_000_000 / duration)
@@ -103,6 +111,7 @@ impl VideoDecodeWorker {
         let access_unit = QueuedAccessUnit {
             data,
             queued_at: Instant::now(),
+            arrived_at,
             generation: self.generation.load(Ordering::Acquire),
         };
         match self.access_units.try_send(access_unit) {
@@ -261,6 +270,7 @@ fn decode_queued_access_unit(
                     visible,
                     decoded_at: Instant::now(),
                     handed_off_at: None,
+                    arrived_at: access_unit.arrived_at,
                 }),
             );
         }

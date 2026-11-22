@@ -11,6 +11,7 @@ pub use worker::VideoDecodeWorker;
 use anyhow::{Result, ensure};
 use memory::DecoderBlock;
 use std::sync::{Mutex, atomic::AtomicBool};
+use std::time::Duration;
 
 #[derive(Clone, Copy)]
 pub(crate) struct YuvLayout {
@@ -30,20 +31,50 @@ impl YuvLayout {
     }
 }
 
-static IDLE_OUTPUT_SLOTS: Mutex<Option<[DecoderBlock; 3]>> = Mutex::new(None);
+/// Preferred number of staging slots. A decoded frame stays valid only until
+/// the decoder recycles its slot, which happens once per decoded frame, so
+/// three slots give a ~50 ms window at 60 fps. Under load the UI can miss
+/// that window and the upload is thrown away (`slot_dropped`).
+const STAGING_SLOT_TARGET: usize = 5;
+/// Never go below this, even if the memory pool is tight.
+const STAGING_SLOT_MIN: usize = 3;
+
+/// How old a decoded frame may get before it is dropped instead of shown.
+///
+/// Frames are displayed oldest-first so that a frame which arrived between
+/// two display frames still reaches the screen instead of being superseded.
+/// That queue must never make the picture older than it would have been
+/// otherwise, so anything older than this limit is dropped. It is set to the
+/// worst age the display path already shows, which makes the queue a pure
+/// gain: it recovers frames without moving the frame age.
+pub(crate) const FRESH_FRAME_LIMIT: Duration = Duration::from_millis(50);
+
+static IDLE_OUTPUT_SLOTS: Mutex<Option<Vec<DecoderBlock>>> = Mutex::new(None);
 
 pub(crate) fn reserve_yuv_output() -> Result<()> {
     let layout = YuvLayout::new(STREAM_WIDTH, STREAM_HEIGHT)?;
-    *IDLE_OUTPUT_SLOTS.lock().unwrap() = Some([
-        DecoderBlock::allocate(layout.bytes, false)?,
-        DecoderBlock::allocate(layout.bytes, false)?,
-        DecoderBlock::allocate(layout.bytes, false)?,
-    ]);
+    // Allocate as many slots as the pool allows, up to the target, so a tight
+    // memory pool degrades to the old depth instead of failing to start.
+    let mut slots: Vec<DecoderBlock> = Vec::with_capacity(STAGING_SLOT_TARGET);
+    for index in 0..STAGING_SLOT_TARGET {
+        match DecoderBlock::allocate(layout.bytes, false) {
+            Ok(block) => slots.push(block),
+            Err(error) => {
+                if index < STAGING_SLOT_MIN {
+                    return Err(error);
+                }
+                eprintln!("Only {index} staging slots could be allocated; continuing with {index}");
+                break;
+            }
+        }
+    }
+    eprintln!("Allocated {} NV12 staging slots", slots.len());
+    *IDLE_OUTPUT_SLOTS.lock().unwrap() = Some(slots);
     Ok(())
 }
 
 pub(crate) struct DirectVideoOutput {
-    slots: Mutex<Option<[DecoderBlock; 3]>>,
+    slots: Mutex<Option<Vec<DecoderBlock>>>,
     state: Mutex<SlotState>,
     pub(crate) decoder_uses_phycont: AtomicBool,
 }
@@ -51,7 +82,7 @@ pub(crate) struct DirectVideoOutput {
 #[derive(Default)]
 struct SlotState {
     next: u64,
-    generations: [Option<u64>; 3],
+    generations: Vec<Option<u64>>,
 }
 
 impl DirectVideoOutput {
@@ -65,8 +96,11 @@ impl DirectVideoOutput {
 
     fn acquire_slots(&self, layout: YuvLayout) -> Result<()> {
         ensure!(layout.bytes <= YuvLayout::new(STREAM_WIDTH, STREAM_HEIGHT)?.bytes);
-        let slots = IDLE_OUTPUT_SLOTS.lock().unwrap().take()
-            .ok_or_else(|| anyhow::anyhow!("NV12 output buffers are still in use by the previous stream"))?;
+        let slots = IDLE_OUTPUT_SLOTS.lock().unwrap().take().ok_or_else(|| {
+            anyhow::anyhow!("NV12 output buffers are still in use by the previous stream")
+        })?;
+        let count = slots.len();
+        self.state.lock().unwrap().generations = vec![None; count];
         *self.slots.lock().unwrap() = Some(slots);
         Ok(())
     }
@@ -74,7 +108,13 @@ impl DirectVideoOutput {
     fn reserve(&self) -> (usize, u64, *mut u8) {
         let mut state = self.state.lock().unwrap();
         let generation = state.next;
-        let index = (generation % 3) as usize;
+        let count = self
+            .slots
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(1, |slots| slots.len());
+        let index = (generation % count as u64) as usize;
         state.next = generation.wrapping_add(1);
         state.generations[index] = None;
         let address = self.slots.lock().unwrap().as_ref().unwrap()[index].address;
@@ -110,6 +150,8 @@ pub struct DecodedFrame {
     pub(crate) visible: [u32; 4],
     pub(crate) decoded_at: std::time::Instant,
     pub(crate) handed_off_at: Option<std::time::Instant>,
+    /// When the first RTP packet of this frame arrived on the wire.
+    pub(crate) arrived_at: std::time::Instant,
 }
 
 #[derive(Clone, Copy)]
