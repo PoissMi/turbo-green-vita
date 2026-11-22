@@ -75,6 +75,9 @@ pub struct VitaSurface {
     cached_primitives: Vec<egui::ClippedPrimitive>,
     cached_pixels_per_point: f32,
     cached_textures_delta: egui::TexturesDelta,
+    /// When the display was last flipped. Used to measure the real present
+    /// rate and the worst gap between flips (the freeze detector).
+    last_present_at: Option<Instant>,
 }
 
 impl VitaSurface {
@@ -110,7 +113,23 @@ impl VitaSurface {
             cached_primitives: Vec::new(),
             cached_pixels_per_point: 1.0,
             cached_textures_delta: egui::TexturesDelta::default(),
+            last_present_at: None,
         })
+    }
+
+    /// Records a display flip: the real present rate, plus the worst gap
+    /// between two flips. A long gap is a stall the user sees as latency.
+    fn record_present(&mut self) {
+        let metrics = &crate::streaming::video::metrics::METRICS;
+        let now = Instant::now();
+        if let Some(previous) = self.last_present_at {
+            let gap_us = now.duration_since(previous).as_micros() as u64;
+            metrics.present_gap_max_us.fetch_max(gap_us, Ordering::Relaxed);
+            metrics.present_gap_sum_us.fetch_add(gap_us, Ordering::Relaxed);
+            metrics.present_gap_count.fetch_add(1, Ordering::Relaxed);
+        }
+        self.last_present_at = Some(now);
+        metrics.presents.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Where the video quad lands on screen - accounts for letterboxing, see `fit_rect`.
@@ -321,6 +340,7 @@ impl VitaSurface {
         crate::streaming::video::metrics::METRICS
             .present_us
             .store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+        self.record_present();
         let context = SCENE_CAPTURE.with(|capture| capture.take()).filter(|context| !context.is_null());
         if self.source.is_some() {
             if let Some(context) = context {
@@ -359,6 +379,7 @@ impl VitaSurface {
         crate::streaming::video::metrics::METRICS
             .present_us
             .store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+        self.record_present();
         // SDL may end more than one GXM scene per present on Vita; the wrap
         // hook captures the last one. Record which display texture that
         // scene sampled so the next reuse of *that* texture waits on it —

@@ -31,6 +31,13 @@ pub(crate) struct VideoMetrics {
     pub(crate) input_lag_count: AtomicU64,
     /// Keyframes requested from the server.
     pub(crate) keyframes_requested: AtomicU64,
+    /// Actual display flips per window. `presented` counts uploads; this
+    /// counts what the screen really showed.
+    pub(crate) presents: AtomicU64,
+    /// Worst gap between two display flips: the freeze detector.
+    pub(crate) present_gap_max_us: AtomicU64,
+    pub(crate) present_gap_sum_us: AtomicU64,
+    pub(crate) present_gap_count: AtomicU64,
     pub(crate) queue_full: AtomicU64,
     /// Frames that never made it to `sync_video_frame`'s upload because the
     /// staging slot was recycled underneath us (`with_frame` returned None).
@@ -64,6 +71,10 @@ pub(crate) static METRICS: VideoMetrics = VideoMetrics {
     input_lag_sum_us: AtomicU64::new(0),
     input_lag_count: AtomicU64::new(0),
     keyframes_requested: AtomicU64::new(0),
+    presents: AtomicU64::new(0),
+    present_gap_max_us: AtomicU64::new(0),
+    present_gap_sum_us: AtomicU64::new(0),
+    present_gap_count: AtomicU64::new(0),
     queue_full: AtomicU64::new(0),
     slot_dropped: AtomicU64::new(0),
     resyncs: AtomicU64::new(0),
@@ -85,8 +96,13 @@ pub fn video_performance_summary() -> String {
         .swap(0, Ordering::Relaxed)
         .checked_div(METRICS.input_lag_count.swap(0, Ordering::Relaxed))
         .unwrap_or(0);
+    let present_gap_average = METRICS
+        .present_gap_sum_us
+        .swap(0, Ordering::Relaxed)
+        .checked_div(METRICS.present_gap_count.swap(0, Ordering::Relaxed))
+        .unwrap_or(0);
     format!(
-        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{}",
+        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us",
         METRICS.decoded.swap(0, Ordering::Relaxed),
         METRICS.presented.swap(0, Ordering::Relaxed),
         METRICS.decode_us.load(Ordering::Relaxed),
@@ -108,5 +124,7 @@ pub fn video_performance_summary() -> String {
         METRICS.frame_age_max_us.swap(0, Ordering::Relaxed),
         METRICS.input_lag_max_us.swap(0, Ordering::Relaxed),
         METRICS.keyframes_requested.swap(0, Ordering::Relaxed),
+        METRICS.presents.swap(0, Ordering::Relaxed),
+        METRICS.present_gap_max_us.swap(0, Ordering::Relaxed),
     )
 }
