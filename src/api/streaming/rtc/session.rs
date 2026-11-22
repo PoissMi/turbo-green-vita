@@ -18,6 +18,14 @@ const KEYFRAME_REQUEST_COOLDOWN: Duration = Duration::from_millis(120);
 const BANDWIDTH_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 const INITIAL_VIDEO_GRACE: Duration = Duration::from_millis(500);
 const INITIAL_VIDEO_KEYFRAME_INTERVAL: Duration = Duration::from_millis(500);
+/// The server is never asked for less than this, so a struggling path
+/// degrades in quality instead of collapsing the stream.
+const MIN_BANDWIDTH_ESTIMATE_KBPS: u32 = 1500;
+/// The server's video timeline slipping by more than this over a minute means
+/// a queue is growing in front of us.
+const DRIFT_BACKOFF_MS: i64 = 25;
+/// Below this the path is keeping up, so the estimate may climb again.
+const DRIFT_RECOVER_MS: i64 = 8;
 
 pub(crate) struct RtcSessionConfig {
     pub stun_server: &'static str,
@@ -55,6 +63,9 @@ pub(crate) struct RtcSession<B: RtcSessionBackend> {
     pub(crate) video: VideoReceiver,
     pub(crate) audio: AudioReceiver,
     max_video_bitrate_kbps: u32,
+    /// What we currently ask the server for. The user's setting is the
+    /// ceiling; this is what the path has actually proven it can carry.
+    bandwidth_estimate_kbps: u32,
     last_bandwidth_report: Option<Instant>,
     last_keyframe_request: Option<Instant>,
     initial_video_watchdog_started_at: Option<Instant>,
@@ -81,6 +92,7 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             video,
             audio: AudioReceiver::new(config.audio_sample_rate, config.audio_payload_type),
             max_video_bitrate_kbps: config.max_video_bitrate_kbps,
+            bandwidth_estimate_kbps: config.max_video_bitrate_kbps,
             last_bandwidth_report: None,
             last_keyframe_request: None,
             initial_video_watchdog_started_at: None,
@@ -148,10 +160,8 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             .is_none_or(|previous| now.duration_since(previous) >= BANDWIDTH_REPORT_INTERVAL)
         {
             self.last_bandwidth_report = Some(now);
-            self.video.send_bandwidth_estimate(
-                &mut self.peer,
-                (self.max_video_bitrate_kbps * 1000) as f32,
-            );
+            let estimate = self.next_bandwidth_estimate();
+            self.video.send_bandwidth_estimate(&mut self.peer, (estimate * 1000) as f32);
         }
         if let Some(status) = self.video.status(now) {
             let server = self
@@ -164,6 +174,50 @@ impl<B: RtcSessionBackend> RtcSession<B> {
         }
 
         Ok(gathered_candidates)
+    }
+
+    /// Decides what to ask the server for next.
+    ///
+    /// The server sizes its encoder from our REMB. If it then sends faster
+    /// than the path can carry, the video piles up in a queue in front of us:
+    /// every frame arrives later than the one before, so the picture falls
+    /// steadily behind reality while every client-side number still looks
+    /// perfect. The input suffers with it, because the server reads the
+    /// controller from behind the same backlog - which is exactly the "the
+    /// character reacts late" symptom.
+    ///
+    /// `server_drift_us` measures that pile-up directly, so the estimate can
+    /// back off instead of asking for a rate the path cannot sustain. The
+    /// user's setting stays the ceiling: the estimate climbs back towards it
+    /// whenever the path keeps up.
+    fn next_bandwidth_estimate(&mut self) -> u32 {
+        let ceiling = self
+            .max_video_bitrate_kbps
+            .max(MIN_BANDWIDTH_ESTIMATE_KBPS);
+        let drift_ms = crate::streaming::video::metrics::METRICS
+            .server_drift_us
+            .load(std::sync::atomic::Ordering::Relaxed)
+            / 1000;
+        let current = self
+            .bandwidth_estimate_kbps
+            .max(MIN_BANDWIDTH_ESTIMATE_KBPS);
+        let next = if drift_ms > DRIFT_BACKOFF_MS {
+            // The queue is growing: ask for noticeably less than we get.
+            (current * 85 / 100).max(MIN_BANDWIDTH_ESTIMATE_KBPS)
+        } else if drift_ms < DRIFT_RECOVER_MS {
+            // The path is keeping up: climb back towards the ceiling.
+            current
+                .saturating_add(ceiling.saturating_sub(current) / 8)
+                .saturating_add(50)
+                .min(ceiling)
+        } else {
+            current
+        };
+        self.bandwidth_estimate_kbps = next;
+        crate::streaming::video::metrics::METRICS
+            .bandwidth_estimate_kbps
+            .store(u64::from(next), std::sync::atomic::Ordering::Relaxed);
+        next
     }
 
     fn initial_video_keyframe_due(&mut self, now: Instant) -> bool {

@@ -84,9 +84,11 @@ impl RtcTransport {
     }
 
     pub(crate) fn receive(&mut self, peer: &mut RTCPeerConnection) {
+        let mut packets = 0u64;
         loop {
             match self.socket.try_recv_from(&mut self.recv_buf) {
                 Ok((n, peer_addr)) => {
+                    packets += 1;
                     if let Err(error) = peer.handle_read(TaggedBytesMut {
                         now: Instant::now(),
                         transport: TransportContext {
@@ -106,6 +108,19 @@ impl RtcTransport {
                     break;
                 }
             }
+        }
+        // A batch of many packets means the server is sending faster than we
+        // drain, so the queue in front of the client is growing.
+        if packets > 0 {
+            crate::streaming::video::metrics::METRICS
+                .rx_batch_sum
+                .fetch_add(packets, std::sync::atomic::Ordering::Relaxed);
+            crate::streaming::video::metrics::METRICS
+                .rx_batch_max
+                .fetch_max(packets, std::sync::atomic::Ordering::Relaxed);
+            crate::streaming::video::metrics::METRICS
+                .rx_batch_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }

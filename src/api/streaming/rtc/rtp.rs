@@ -92,6 +92,12 @@ pub(super) struct VideoRtp {
     waiting_for_keyframe: bool,
     max_width: u32,
     max_height: u32,
+    /// Anchor for the server-timeline measurement: the first frame's RTP
+    /// timestamp and the instant its first packet arrived.
+    timeline_origin: Option<(u32, Instant)>,
+    /// One sample per second of (arrival, RTP timestamp) so the offset can be
+    /// compared against a minute-old sample.
+    timeline_samples: VecDeque<(Instant, u32)>,
 }
 
 struct PendingVideoFrame {
@@ -247,6 +253,8 @@ impl VideoRtp {
             waiting_for_keyframe: false,
             max_width,
             max_height,
+            timeline_origin: None,
+            timeline_samples: VecDeque::new(),
         }
     }
 
@@ -407,6 +415,66 @@ impl VideoRtp {
         stats.dropped = stats.dropped.saturating_add(1);
     }
 
+    /// Measures how far the server's video timeline lags our wall clock.
+    ///
+    /// The frame age the HUD reports starts when a packet leaves the socket
+    /// buffer, so a queue that grows in front of the client - the server's
+    /// send path, or the network in between - is invisible there: every frame
+    /// looks "fresh" by the time we see it while the picture itself falls
+    /// further and further behind reality. The RTP timestamp is the server's
+    /// capture time, so the gap between it and our arrival clock is exactly
+    /// that hidden delay. Only its *change* over time matters; the absolute
+    /// value carries the network delay.
+    fn record_timeline(&mut self, rtp_timestamp: u32, arrived_at: Instant) {
+        let Some((origin_ts, origin_wall)) = self.timeline_origin else {
+            self.timeline_origin = Some((rtp_timestamp, arrived_at));
+            return;
+        };
+        let offset_us =
+            Self::timeline_offset_us(origin_ts, origin_wall, rtp_timestamp, arrived_at);
+        crate::streaming::video::metrics::METRICS
+            .server_offset_us
+            .store(offset_us, Ordering::Relaxed);
+
+        // One sample per second is enough to see a queue that grows over
+        // minutes, and it keeps the comparison below free of packet jitter.
+        let due = self
+            .timeline_samples
+            .back()
+            .is_none_or(|(last_at, _)| arrived_at.duration_since(*last_at) >= Duration::from_secs(1));
+        if !due {
+            return;
+        }
+        self.timeline_samples.push_back((arrived_at, rtp_timestamp));
+        while self.timeline_samples.len() > 130 {
+            self.timeline_samples.pop_front();
+        }
+        // Compare against the sample from about a minute ago: a positive
+        // drift means the video is arriving later and later.
+        if let Some((at, ts)) = self
+            .timeline_samples
+            .iter()
+            .find(|(at, _)| arrived_at.duration_since(*at) >= Duration::from_secs(58))
+        {
+            let previous = Self::timeline_offset_us(origin_ts, origin_wall, *ts, *at);
+            crate::streaming::video::metrics::METRICS
+                .server_drift_us
+                .store(offset_us - previous, Ordering::Relaxed);
+        }
+    }
+
+    fn timeline_offset_us(
+        origin_ts: u32,
+        origin_wall: Instant,
+        rtp_timestamp: u32,
+        arrived_at: Instant,
+    ) -> i64 {
+        let rtp_delta_us = rtp_timestamp.wrapping_sub(origin_ts) as i64 * 1_000_000
+            / i64::from(VIDEO_RTP_CLOCK_RATE);
+        let wall_delta_us = arrived_at.duration_since(origin_wall).as_micros() as i64;
+        wall_delta_us - rtp_delta_us
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn submit_completed(
         &mut self,
@@ -419,6 +487,8 @@ impl VideoRtp {
     ) {
         // Record both average and worst-case RTP assembly time for the stream HUD.
         let assembly_us = completed.first_packet_at.elapsed().as_micros() as u64;
+        // How late this frame is compared to the server's own timeline.
+        self.record_timeline(completed.timestamp, completed.first_packet_at);
         crate::streaming::video::metrics::METRICS
             .rtp_assembly_sum_us
             .fetch_add(assembly_us, Ordering::Relaxed);

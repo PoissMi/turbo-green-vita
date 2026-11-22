@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 pub(crate) struct VideoMetrics {
     pub(crate) rtp_assembly_sum_us: AtomicU64,
@@ -54,6 +54,25 @@ pub(crate) struct VideoMetrics {
     pub(crate) slot_dropped: AtomicU64,
     pub(crate) resyncs: AtomicU64,
     pub(crate) resets: AtomicU64,
+    /// How far the server's video timeline lags our wall clock, in
+    /// microseconds. This is the delay the client cannot see on its own: the
+    /// frame age is measured from the moment the packet leaves the socket
+    /// buffer, so a queue that grows in front of the client (the server's
+    /// send path or the network) makes every frame *older* while all the
+    /// client-side numbers stay perfect.
+    pub(crate) server_offset_us: AtomicI64,
+    /// How much that offset grew over the last minute. A steady positive
+    /// value means the video is arriving later and later: the picture is
+    /// lagging behind reality more and more.
+    pub(crate) server_drift_us: AtomicI64,
+    /// The bitrate we currently ask the server for, in kbps. The user's
+    /// setting is the ceiling; this is what we believe the path can carry.
+    pub(crate) bandwidth_estimate_kbps: AtomicU64,
+    /// Packets drained from the socket per receive call. A rising batch size
+    /// means packets are piling up in the client's own receive buffer.
+    pub(crate) rx_batch_sum: AtomicU64,
+    pub(crate) rx_batch_max: AtomicU64,
+    pub(crate) rx_batch_count: AtomicU64,
 }
 
 pub(crate) static METRICS: VideoMetrics = VideoMetrics {
@@ -94,6 +113,12 @@ pub(crate) static METRICS: VideoMetrics = VideoMetrics {
     slot_dropped: AtomicU64::new(0),
     resyncs: AtomicU64::new(0),
     resets: AtomicU64::new(0),
+    server_offset_us: AtomicI64::new(0),
+    server_drift_us: AtomicI64::new(0),
+    bandwidth_estimate_kbps: AtomicU64::new(0),
+    rx_batch_sum: AtomicU64::new(0),
+    rx_batch_max: AtomicU64::new(0),
+    rx_batch_count: AtomicU64::new(0),
 };
 
 pub fn video_performance_summary() -> String {
@@ -121,8 +146,15 @@ pub fn video_performance_summary() -> String {
         .swap(0, Ordering::Relaxed)
         .checked_div(METRICS.audio_buffer_count.swap(0, Ordering::Relaxed))
         .unwrap_or(0);
+    let rx_batch_average = METRICS
+        .rx_batch_sum
+        .swap(0, Ordering::Relaxed)
+        .checked_div(METRICS.rx_batch_count.swap(0, Ordering::Relaxed))
+        .unwrap_or(0);
+    let server_offset_ms = METRICS.server_offset_us.load(Ordering::Relaxed) / 1000;
+    let server_drift_ms = METRICS.server_drift_us.load(Ordering::Relaxed) / 1000;
     format!(
-        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us",
+        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us\nsrv:{server_offset_ms}ms drift:{server_drift_ms}ms remb:{}kbps rx-b:{}/{}",
         METRICS.decoded.swap(0, Ordering::Relaxed),
         METRICS.presented.swap(0, Ordering::Relaxed),
         METRICS.decode_us.load(Ordering::Relaxed),
@@ -149,5 +181,8 @@ pub fn video_performance_summary() -> String {
         METRICS.audio_buffer_ms.swap(0, Ordering::Relaxed),
         METRICS.audio_resyncs.swap(0, Ordering::Relaxed),
         METRICS.flush_gap_max_us.swap(0, Ordering::Relaxed),
+        METRICS.bandwidth_estimate_kbps.load(Ordering::Relaxed),
+        rx_batch_average,
+        METRICS.rx_batch_max.swap(0, Ordering::Relaxed),
     )
 }
