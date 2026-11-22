@@ -64,7 +64,7 @@ impl App {
         match command {
             InputCommand::Back => {
                 let state =
-                    std::mem::replace(&mut self.state, AppState::ModeSelect { selected: 0 });
+                    std::mem::replace(&mut self.state, AppState::TitleList { selected: 0 });
                 match state {
                     AppState::StartingStream { target, job } => {
                         if let Some(job) = job {
