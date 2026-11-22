@@ -8,7 +8,12 @@ pub const AUDIO_SAMPLE_RATE: i32 = 48_000;
 const AUDIO_CHANNELS: usize = 2;
 
 const AUDIO_BYTES_PER_SECOND: u32 = AUDIO_SAMPLE_RATE as u32 * AUDIO_CHANNELS as u32 * 2;
-const MAX_QUEUED_AUDIO_BYTES: u32 = AUDIO_BYTES_PER_SECOND * 240 / 1_000;
+/// Hard cap on the audio queued in the device.
+///
+/// The queue depth *is* the A/V desync: whatever sits in here is audio the
+/// player has already heard the video for. It used to be 240 ms, which is
+/// how the sound ended up almost a third of a second behind the picture.
+const MAX_QUEUED_AUDIO_BYTES: u32 = AUDIO_BYTES_PER_SECOND * 120 / 1_000;
 /// How much audio to buffer before starting playback.
 ///
 /// This used to be 80 ms, which put the sound roughly a third of a second
