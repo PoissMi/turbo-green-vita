@@ -92,6 +92,22 @@ impl PendingVideoFrame {
         }
     }
 
+    fn insert_sorted(&mut self, packet: Packet) {
+        // Packets are kept unsorted here; `assemble` sorts by forward
+        // sequence distance from the marker (arrival-order independent).
+        // Incremental ordered insertion is unsafe for out-of-order delivery
+        // (a packet arriving before the head mis-orders the buffer), so the
+        // sort stays in assemble — the optimization is NACK + queue work
+        // elsewhere, not here.
+        if !self
+            .packets
+            .iter()
+            .any(|existing| existing.header.sequence_number == packet.header.sequence_number)
+        {
+            self.packets.push(packet);
+        }
+    }
+    #[allow(dead_code)]
     fn insert(&mut self, packet: Packet) {
         if !self
             .packets
@@ -149,6 +165,9 @@ impl PendingVideoFrame {
         let Some(marker_sequence) = self.marker_sequence() else {
             return FrameAssembly::Pending;
         };
+        // Sort by forward sequence distance from the marker: arrival-order
+        // independent (packets arrive out of order). Previously this ran
+        // on every receive (O(n^2) per frame); see insert_sorted.
         let mut packets = self.packets.iter().collect::<Vec<_>>();
         packets.sort_unstable_by_key(|packet| {
             std::cmp::Reverse(marker_sequence.wrapping_sub(packet.header.sequence_number))
@@ -261,7 +280,7 @@ impl VideoRtp {
             }
             self.pending = Some(PendingVideoFrame::new(packet));
         } else if let Some(pending) = &mut self.pending {
-            pending.insert(packet);
+            pending.insert_sorted(packet);
         }
 
         let assembly = self
