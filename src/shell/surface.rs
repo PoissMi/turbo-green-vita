@@ -70,6 +70,11 @@ pub struct VitaSurface {
     video_height: u32,
     last_frame_id: u64,
     egui_painter: SdlEguiPainter,
+    /// Cached overlay geometry from the last full egui pass. Replayed on
+    /// video-only frames so the debug chip doesn't strobe at 10Hz.
+    cached_primitives: Vec<egui::ClippedPrimitive>,
+    cached_pixels_per_point: f32,
+    cached_textures_delta: egui::TexturesDelta,
 }
 
 impl VitaSurface {
@@ -102,6 +107,9 @@ impl VitaSurface {
             video_height: 0,
             last_frame_id: 0,
             egui_painter: SdlEguiPainter::default(),
+            cached_primitives: Vec::new(),
+            cached_pixels_per_point: 1.0,
+            cached_textures_delta: egui::TexturesDelta::default(),
         })
     }
 
@@ -206,6 +214,7 @@ impl VitaSurface {
         self.video_width = 0;
         self.video_height = 0;
         self.last_frame_id = 0;
+        self.cached_primitives.clear();
     }
 
     pub fn draw_scene(&mut self, show_video: bool) -> Result<()> {
@@ -227,12 +236,54 @@ impl VitaSurface {
         Ok(())
     }
 
+    /// Video-only present used while streaming with minimal overlays.
+    /// `draw_scene` arms the GXM scene capture; `present` swaps the
+    /// framebuffer and records which display texture the GPU last sampled,
+    /// so the next reuse of that texture waits on the right scene.
+    /// The cached overlay geometry is repainted on top (no egui rebuild),
+    /// so the debug chip stays visible instead of strobing at 10Hz.
+    pub fn present_video_only(&mut self, show_video: bool) -> Result<()> {
+        self.draw_scene(show_video)?;
+        if !self.cached_primitives.is_empty() {
+            let primitives: Vec<egui::ClippedPrimitive> = self.cached_primitives.clone();
+            let ppp = self.cached_pixels_per_point;
+            // Textures are already uploaded; pass an empty delta.
+            let delta = egui::TexturesDelta::default();
+            self.egui_painter.paint(
+                &mut self.canvas,
+                [WIDTH, HEIGHT],
+                ppp,
+                &primitives,
+                &delta,
+            )?;
+        }
+        self.canvas.present();
+        let context = SCENE_CAPTURE.with(|capture| capture.take()).filter(|context| !context.is_null());
+        if self.source.is_some() {
+            if let Some(context) = context {
+                self.scene_for[self.display_index] = Some(context);
+            }
+            anyhow::ensure!(
+                self.scene_for.iter().any(|scene| scene.is_some()),
+                "missing GXM completion context after NV12 draw"
+            );
+        }
+        Ok(())
+    }
+
     pub fn paint_egui(
         &mut self,
         pixels_per_point: f32,
         primitives: &[egui::ClippedPrimitive],
         textures_delta: &egui::TexturesDelta,
     ) -> Result<()> {
+        // Cache for the video-only replay path.
+        self.cached_primitives.clear();
+        self.cached_primitives.extend(primitives.iter().cloned());
+        self.cached_pixels_per_point = pixels_per_point;
+        // Textures were already uploaded by the painter below; keep an
+        // empty delta so replays don't re-upload (and don't free).
+        self.cached_textures_delta = egui::TexturesDelta::default();
         self.egui_painter.paint(
             &mut self.canvas,
             [WIDTH, HEIGHT],
