@@ -173,7 +173,10 @@ impl App {
                     cleanup_active_sessions(&api, StreamKind::Cloud).await;
                     cleanup_active_sessions(&api, StreamKind::Home).await;
                 });
-                self.set_state(AppState::ModeSelect { selected: 0 });
+                // No mode picker: straight into Cloud titles.
+                self.choose_stream_kind(StreamKind::Cloud).unwrap_or_else(|_| {
+                    eprintln!("failed to enter Cloud title list");
+                });
             }
             PollJob::Done(Ok(CredentialsLoadResult {
                 result: Err(error),
