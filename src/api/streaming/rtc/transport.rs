@@ -13,6 +13,10 @@ pub(crate) struct RtcTransport {
     pub(crate) socket: UdpSocket,
     local_addr: SocketAddr,
     recv_buf: Vec<u8>,
+    /// When the last data-channel flush went out. The input waits for the
+    /// next flush, so the worst gap between flushes bounds the input's
+    /// delay on the wire.
+    last_flush_at: Option<Instant>,
 }
 
 impl RtcTransport {
@@ -49,11 +53,14 @@ impl RtcTransport {
             socket,
             local_addr,
             recv_buf: vec![0u8; 2048],
+            last_flush_at: None,
         })
     }
 
-    pub(crate) async fn flush(&self, peer: &mut RTCPeerConnection) {
+    pub(crate) async fn flush(&mut self, peer: &mut RTCPeerConnection) {
+        let mut sent = false;
         while let Some(outgoing) = peer.poll_write() {
+            sent = true;
             if let Err(error) = self
                 .socket
                 .send_to(&outgoing.message, outgoing.transport.peer_addr)
@@ -64,6 +71,15 @@ impl RtcTransport {
                     outgoing.transport.peer_addr
                 );
             }
+        }
+        if sent {
+            let now = Instant::now();
+            if let Some(previous) = self.last_flush_at {
+                crate::streaming::video::metrics::METRICS
+                    .flush_gap_max_us
+                    .fetch_max(now.duration_since(previous).as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.last_flush_at = Some(now);
         }
     }
 

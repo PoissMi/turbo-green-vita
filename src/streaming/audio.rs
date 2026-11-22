@@ -166,6 +166,15 @@ impl AudioRenderer {
                 }
             }
         }
+
+        // How much audio is queued in the device right now. Together with the
+        // RTP jitter buffer this is the audio side of the A/V desync: the
+        // video is ~20 ms old when it hits the screen, so a deep audio queue
+        // means the sound lags the picture by that much.
+        let queued_ms = (self.queue.size() * 1_000) / AUDIO_BYTES_PER_SECOND;
+        crate::streaming::video::metrics::METRICS
+            .audio_buffer_ms
+            .fetch_max(queued_ms as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn restart_decode_worker(&mut self) {

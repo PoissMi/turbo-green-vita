@@ -38,6 +38,12 @@ pub(crate) struct VideoMetrics {
     pub(crate) present_gap_max_us: AtomicU64,
     pub(crate) present_gap_sum_us: AtomicU64,
     pub(crate) present_gap_count: AtomicU64,
+    /// Audio currently queued in the SDL audio device, in milliseconds.
+    /// This is the audio side of the A/V desync.
+    pub(crate) audio_buffer_ms: AtomicU64,
+    /// Worst gap between two data-channel flushes. The input waits for the
+    /// next flush, so this bounds the input's delay on the wire.
+    pub(crate) flush_gap_max_us: AtomicU64,
     pub(crate) queue_full: AtomicU64,
     /// Frames that never made it to `sync_video_frame`'s upload because the
     /// staging slot was recycled underneath us (`with_frame` returned None).
@@ -75,6 +81,8 @@ pub(crate) static METRICS: VideoMetrics = VideoMetrics {
     present_gap_max_us: AtomicU64::new(0),
     present_gap_sum_us: AtomicU64::new(0),
     present_gap_count: AtomicU64::new(0),
+    audio_buffer_ms: AtomicU64::new(0),
+    flush_gap_max_us: AtomicU64::new(0),
     queue_full: AtomicU64::new(0),
     slot_dropped: AtomicU64::new(0),
     resyncs: AtomicU64::new(0),
@@ -102,7 +110,7 @@ pub fn video_performance_summary() -> String {
         .checked_div(METRICS.present_gap_count.swap(0, Ordering::Relaxed))
         .unwrap_or(0);
     format!(
-        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us",
+        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{}ms flush-gap:{}us",
         METRICS.decoded.swap(0, Ordering::Relaxed),
         METRICS.presented.swap(0, Ordering::Relaxed),
         METRICS.decode_us.load(Ordering::Relaxed),
@@ -126,5 +134,7 @@ pub fn video_performance_summary() -> String {
         METRICS.keyframes_requested.swap(0, Ordering::Relaxed),
         METRICS.presents.swap(0, Ordering::Relaxed),
         METRICS.present_gap_max_us.swap(0, Ordering::Relaxed),
+        METRICS.audio_buffer_ms.swap(0, Ordering::Relaxed),
+        METRICS.flush_gap_max_us.swap(0, Ordering::Relaxed),
     )
 }
