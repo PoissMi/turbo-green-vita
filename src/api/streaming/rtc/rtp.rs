@@ -79,7 +79,7 @@ struct PendingVideoFrame {
 
 enum FrameAssembly {
     Pending,
-    Complete { data: Bytes, marker_sequence: u16 },
+    Complete { data: Vec<u8>, marker_sequence: u16 },
     Invalid,
 }
 
@@ -131,8 +131,6 @@ impl PendingVideoFrame {
         let Some(marker) = self.marker_sequence() else {
             return Vec::new();
         };
-        let present: std::collections::HashSet<u16> =
-            self.packets.iter().map(|p| p.header.sequence_number).collect();
         // Walk back from marker to first received packet's neighbourhood.
         // The smallest seen sequence bounds the window.
         let mut seqs = self.packets.iter().map(|p| p.header.sequence_number).collect::<Vec<_>>();
@@ -141,8 +139,9 @@ impl PendingVideoFrame {
         let mut missing = Vec::new();
         let mut seq = start;
         // At most 16 iterations: the NACK bitmap covers packet_id + 16 bits.
+        // `seqs` is sorted; membership is a binary search, no HashSet alloc.
         for _ in 0..16 {
-            if !present.contains(&seq) {
+            if seqs.binary_search(&seq).is_err() {
                 missing.push(seq);
             }
             if seq == marker {
@@ -201,7 +200,7 @@ impl PendingVideoFrame {
         }
         *depacketizer = H264Packet::default();
         FrameAssembly::Complete {
-            data: Bytes::from(data),
+            data,
             marker_sequence,
         }
     }
@@ -374,7 +373,7 @@ impl VideoRtp {
             self.damage_score = self.damage_score.saturating_sub(1);
         }
 
-        if !worker.submit_access_unit(data.to_vec(), self.source_frame_duration_us) {
+        if !worker.submit_access_unit(data, self.source_frame_duration_us) {
             eprintln!("Video decoder queue is full; continuing while requesting a keyframe");
             *keyframe_requested = true;
             stats.dropped = stats.dropped.saturating_add(1);
