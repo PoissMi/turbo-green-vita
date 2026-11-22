@@ -110,6 +110,8 @@ pub struct DecodedFrame {
     pub(crate) visible: [u32; 4],
     pub(crate) decoded_at: std::time::Instant,
     pub(crate) handed_off_at: Option<std::time::Instant>,
+    /// When the first RTP packet of this frame arrived on the wire.
+    pub(crate) arrived_at: std::time::Instant,
 }
 
 #[derive(Clone, Copy)]

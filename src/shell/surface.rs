@@ -219,6 +219,13 @@ impl VitaSurface {
             anyhow::ensure!(result == 0, "NV12 upload failed: {}", sdl2::get_error());
             let now = Instant::now();
             metrics.upload_us.store(now.duration_since(start).as_micros() as u64, Ordering::Relaxed);
+            // End-to-end frame age: from the first RTP packet hitting the
+            // socket to the frame being uploaded for display. This is the
+            // number that actually describes perceived latency.
+            let age_us = now.duration_since(frame.arrived_at).as_micros() as u64;
+            metrics.frame_age_max_us.fetch_max(age_us, Ordering::Relaxed);
+            metrics.frame_age_sum_us.fetch_add(age_us, Ordering::Relaxed);
+            metrics.frame_age_count.fetch_add(1, Ordering::Relaxed);
             if let Some(handed_off_at) = frame.handed_off_at {
                 metrics.handoff_to_upload_max_us.fetch_max(
                     now.duration_since(handed_off_at).as_micros() as u64,

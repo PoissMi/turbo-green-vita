@@ -46,6 +46,9 @@ enum RtcWorkerCommand {
 
 struct SampledGamepadFrame {
     frame: GamepadFrame,
+    /// When the controller was sampled, so the HUD can report how long an
+    /// input waited before it was put on the wire.
+    sampled_at: Instant,
 }
 
 pub struct RtcWorker {
@@ -130,7 +133,10 @@ impl RtcWorker {
 
     pub fn send_gamepad_frame(&self, frame: GamepadFrame) {
         if let Ok(mut latest) = self.latest_gamepad.lock() {
-            *latest = Some(SampledGamepadFrame { frame });
+            *latest = Some(SampledGamepadFrame {
+                frame,
+                sampled_at: Instant::now(),
+            });
         }
     }
 
@@ -267,11 +273,13 @@ async fn run_session<B: super::session::RtcSessionBackend>(
                 // is temporarily suppressed (for example, until Confirm is released).
                 let sampled = latest.unwrap_or_else(|| SampledGamepadFrame {
                     frame: GamepadFrame::default(),
+                    sampled_at: Instant::now(),
                 });
                 send_sampled_gamepad_frame(&mut session, sampled, &mut last_gamepad_sent, true);
             } else if pulse_started || latest.is_some() {
                 let mut sampled = latest.unwrap_or_else(|| SampledGamepadFrame {
                     frame: GamepadFrame::default(),
+                    sampled_at: Instant::now(),
                 });
                 // Guide/Nexus is currently the only pulsed input. Keep it asserted while normal
                 // gamepad frames continue to flow instead of immediately overwriting the press.
@@ -388,6 +396,19 @@ fn send_sampled_gamepad_frame<B: super::session::RtcSessionBackend>(
     if !force && unchanged_and_fresh {
         return;
     }
+
+    // How long the sampled input waited before it was handed to the peer
+    // connection (and from there onto the wire).
+    let lag_us = now.duration_since(sampled.sampled_at).as_micros() as u64;
+    crate::streaming::video::metrics::METRICS
+        .input_lag_max_us
+        .fetch_max(lag_us, std::sync::atomic::Ordering::Relaxed);
+    crate::streaming::video::metrics::METRICS
+        .input_lag_sum_us
+        .fetch_add(lag_us, std::sync::atomic::Ordering::Relaxed);
+    crate::streaming::video::metrics::METRICS
+        .input_lag_count
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     if session
         .backend

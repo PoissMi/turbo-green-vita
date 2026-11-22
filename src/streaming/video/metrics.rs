@@ -20,6 +20,17 @@ pub(crate) struct VideoMetrics {
     pub(crate) ui_overwrites: AtomicU64,
     pub(crate) decode_to_handoff_max_us: AtomicU64,
     pub(crate) handoff_to_upload_max_us: AtomicU64,
+    /// End-to-end age of the frame being displayed: first RTP packet arrival
+    /// to upload. This is the number that describes perceived latency.
+    pub(crate) frame_age_max_us: AtomicU64,
+    pub(crate) frame_age_sum_us: AtomicU64,
+    pub(crate) frame_age_count: AtomicU64,
+    /// How long a sampled gamepad state waited before it was put on the wire.
+    pub(crate) input_lag_max_us: AtomicU64,
+    pub(crate) input_lag_sum_us: AtomicU64,
+    pub(crate) input_lag_count: AtomicU64,
+    /// Keyframes requested from the server.
+    pub(crate) keyframes_requested: AtomicU64,
     pub(crate) queue_full: AtomicU64,
     /// Frames that never made it to `sync_video_frame`'s upload because the
     /// staging slot was recycled underneath us (`with_frame` returned None).
@@ -46,6 +57,13 @@ pub(crate) static METRICS: VideoMetrics = VideoMetrics {
     ui_overwrites: AtomicU64::new(0),
     decode_to_handoff_max_us: AtomicU64::new(0),
     handoff_to_upload_max_us: AtomicU64::new(0),
+    frame_age_max_us: AtomicU64::new(0),
+    frame_age_sum_us: AtomicU64::new(0),
+    frame_age_count: AtomicU64::new(0),
+    input_lag_max_us: AtomicU64::new(0),
+    input_lag_sum_us: AtomicU64::new(0),
+    input_lag_count: AtomicU64::new(0),
+    keyframes_requested: AtomicU64::new(0),
     queue_full: AtomicU64::new(0),
     slot_dropped: AtomicU64::new(0),
     resyncs: AtomicU64::new(0),
@@ -57,8 +75,18 @@ pub fn video_performance_summary() -> String {
     let rtp_count = METRICS.rtp_assembly_count.swap(0, Ordering::Relaxed);
     let rtp_average = rtp_sum.checked_div(rtp_count).unwrap_or(0);
     let rtp_max = METRICS.rtp_assembly_max_us.swap(0, Ordering::Relaxed);
+    let age_average = METRICS
+        .frame_age_sum_us
+        .swap(0, Ordering::Relaxed)
+        .checked_div(METRICS.frame_age_count.swap(0, Ordering::Relaxed))
+        .unwrap_or(0);
+    let input_lag_average = METRICS
+        .input_lag_sum_us
+        .swap(0, Ordering::Relaxed)
+        .checked_div(METRICS.input_lag_count.swap(0, Ordering::Relaxed))
+        .unwrap_or(0);
     format!(
-        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us",
+        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{}",
         METRICS.decoded.swap(0, Ordering::Relaxed),
         METRICS.presented.swap(0, Ordering::Relaxed),
         METRICS.decode_us.load(Ordering::Relaxed),
@@ -77,5 +105,8 @@ pub fn video_performance_summary() -> String {
         METRICS.ui_overwrites.swap(0, Ordering::Relaxed),
         METRICS.decode_to_handoff_max_us.swap(0, Ordering::Relaxed),
         METRICS.handoff_to_upload_max_us.swap(0, Ordering::Relaxed),
+        METRICS.frame_age_max_us.swap(0, Ordering::Relaxed),
+        METRICS.input_lag_max_us.swap(0, Ordering::Relaxed),
+        METRICS.keyframes_requested.swap(0, Ordering::Relaxed),
     )
 }

@@ -14,7 +14,7 @@ use rtc::sansio::Protocol;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const KEYFRAME_REQUEST_COOLDOWN: Duration = Duration::from_millis(300);
+const KEYFRAME_REQUEST_COOLDOWN: Duration = Duration::from_millis(120);
 const BANDWIDTH_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 const INITIAL_VIDEO_GRACE: Duration = Duration::from_millis(500);
 const INITIAL_VIDEO_KEYFRAME_INTERVAL: Duration = Duration::from_millis(500);
@@ -274,6 +274,9 @@ impl<B: RtcSessionBackend> RtcSession<B> {
         }
 
         self.last_keyframe_request = Some(now);
+        crate::streaming::video::metrics::METRICS
+            .keyframes_requested
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.backend.notify_keyframe_requested(&mut self.peer);
         self.video.request_keyframe(&mut self.peer);
     }
