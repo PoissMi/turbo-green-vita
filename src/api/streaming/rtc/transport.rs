@@ -61,6 +61,20 @@ impl RtcTransport {
         let mut sent = false;
         while let Some(outgoing) = peer.poll_write() {
             sent = true;
+            // The input report that was queued is riding along with this
+            // packet: this is how long it waited for the wire.
+            if let Some(queued_at) = crate::streaming::video::metrics::take_input_queued() {
+                let waited_us = queued_at.elapsed().as_micros() as u64;
+                crate::streaming::video::metrics::METRICS
+                    .input_wire_sum_us
+                    .fetch_add(waited_us, std::sync::atomic::Ordering::Relaxed);
+                crate::streaming::video::metrics::METRICS
+                    .input_wire_max_us
+                    .fetch_max(waited_us, std::sync::atomic::Ordering::Relaxed);
+                crate::streaming::video::metrics::METRICS
+                    .input_wire_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if let Err(error) = self
                 .socket
                 .send_to(&outgoing.message, outgoing.transport.peer_addr)

@@ -81,9 +81,14 @@ pub const CONTROL_CHANNEL: RtcDataChannelConfig = RtcDataChannelConfig {
 pub const INPUT_CHANNEL: RtcDataChannelConfig = RtcDataChannelConfig {
     label: "input",
     protocol: "1.0",
-    ordered: false,
+    // Reliable and ordered, the same shape the upstream client and the
+    // reference implementation use. This was silently turned into an
+    // unordered, no-retransmit PR-SCTP stream by the backend refactor: the
+    // server then has to skip lost chunks with a forward-TSN, and if it
+    // does not, every gap holds the input back longer than the one before.
+    ordered: true,
     max_packet_life_time: None,
-    max_retransmits: Some(0),
+    max_retransmits: None,
 };
 pub const MESSAGE_CHANNEL: RtcDataChannelConfig = RtcDataChannelConfig {
     label: "message",

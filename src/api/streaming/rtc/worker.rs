@@ -16,7 +16,10 @@ use std::time::{Duration, Instant};
 const PUMP_SLEEP: Duration = Duration::from_millis(1);
 const PUMP_ERROR_SLEEP: Duration = Duration::from_millis(100);
 const GAMEPAD_PULSE_DURATION: Duration = Duration::from_millis(100);
-const GAMEPAD_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
+/// How often the controller state is refreshed even when nothing changes.
+/// The reference client polls the pad every 16 ms and reports that often, so
+/// the server always has a recent state to work with.
+const GAMEPAD_REFRESH_INTERVAL: Duration = Duration::from_millis(16);
 const MAX_PENDING_COMMANDS: usize = 16;
 const MAX_PENDING_EVENTS: usize = 32;
 const MAX_PENDING_AUDIO_BATCHES: usize = 16;

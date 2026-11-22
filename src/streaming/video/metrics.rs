@@ -1,4 +1,6 @@
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::Instant;
 
 pub(crate) struct VideoMetrics {
     pub(crate) rtp_assembly_sum_us: AtomicU64,
@@ -73,6 +75,31 @@ pub(crate) struct VideoMetrics {
     pub(crate) rx_batch_sum: AtomicU64,
     pub(crate) rx_batch_max: AtomicU64,
     pub(crate) rx_batch_count: AtomicU64,
+    /// When the last input report was handed to the data channel. The next
+    /// outgoing packet carries it, so the gap between the two is how long
+    /// the report waited for the wire.
+    pub(crate) input_queued_at: Mutex<Option<Instant>>,
+    pub(crate) input_wire_sum_us: AtomicU64,
+    pub(crate) input_wire_max_us: AtomicU64,
+    pub(crate) input_wire_count: AtomicU64,
+    /// Input reports handed to the data channel.
+    pub(crate) input_sent: AtomicU64,
+}
+
+/// Records that an input report was queued for the data channel.
+pub(crate) fn mark_input_queued(at: Instant) {
+    if let Ok(mut slot) = METRICS.input_queued_at.lock() {
+        *slot = Some(at);
+    }
+}
+
+/// Takes the timestamp of the queued input report, if one is waiting.
+pub(crate) fn take_input_queued() -> Option<Instant> {
+    METRICS
+        .input_queued_at
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
 }
 
 pub(crate) static METRICS: VideoMetrics = VideoMetrics {
@@ -119,6 +146,11 @@ pub(crate) static METRICS: VideoMetrics = VideoMetrics {
     rx_batch_sum: AtomicU64::new(0),
     rx_batch_max: AtomicU64::new(0),
     rx_batch_count: AtomicU64::new(0),
+    input_queued_at: Mutex::new(None),
+    input_wire_sum_us: AtomicU64::new(0),
+    input_wire_max_us: AtomicU64::new(0),
+    input_wire_count: AtomicU64::new(0),
+    input_sent: AtomicU64::new(0),
 };
 
 pub fn video_performance_summary() -> String {
@@ -153,8 +185,13 @@ pub fn video_performance_summary() -> String {
         .unwrap_or(0);
     let server_offset_ms = METRICS.server_offset_us.load(Ordering::Relaxed) / 1000;
     let server_drift_ms = METRICS.server_drift_us.load(Ordering::Relaxed) / 1000;
+    let input_wire_average = METRICS
+        .input_wire_sum_us
+        .swap(0, Ordering::Relaxed)
+        .checked_div(METRICS.input_wire_count.swap(0, Ordering::Relaxed))
+        .unwrap_or(0);
     format!(
-        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us\nsrv:{server_offset_ms}ms drift:{server_drift_ms}ms remb:{}kbps rx-b:{}/{}",
+        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us\nsrv:{server_offset_ms}ms drift:{server_drift_ms}ms remb:{}kbps rx-b:{}/{} in-wire:{}/{}us in-rate:{}",
         METRICS.decoded.swap(0, Ordering::Relaxed),
         METRICS.presented.swap(0, Ordering::Relaxed),
         METRICS.decode_us.load(Ordering::Relaxed),
@@ -184,5 +221,8 @@ pub fn video_performance_summary() -> String {
         METRICS.bandwidth_estimate_kbps.load(Ordering::Relaxed),
         rx_batch_average,
         METRICS.rx_batch_max.swap(0, Ordering::Relaxed),
+        input_wire_average,
+        METRICS.input_wire_max_us.swap(0, Ordering::Relaxed),
+        METRICS.input_sent.swap(0, Ordering::Relaxed),
     )
 }

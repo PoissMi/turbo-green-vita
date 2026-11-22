@@ -122,7 +122,18 @@ impl XboxRtcProtocol {
 
     fn send_input_bytes(&self, peer: &mut RTCPeerConnection, bytes: &[u8]) -> bool {
         if let Some(mut input_channel) = peer.data_channel(self.channel_ids.input) {
-            input_channel.send(BytesMut::from(bytes)).is_ok()
+            let queued_at = std::time::Instant::now();
+            let sent = input_channel.send(BytesMut::from(bytes)).is_ok();
+            if sent {
+                // Remember when the report was queued: the next outgoing
+                // packet carries it, so the gap between the two is how long
+                // the report waited for the wire.
+                crate::streaming::video::metrics::mark_input_queued(queued_at);
+                crate::streaming::video::metrics::METRICS
+                    .input_sent
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            sent
         } else {
             false
         }
