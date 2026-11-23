@@ -352,10 +352,12 @@ async fn run_session<B: super::session::RtcSessionBackend>(
 
                 for (id, mut frame) in drained {
                     let now = Instant::now();
-                    METRICS.decode_to_handoff_max_us.fetch_max(
-                        now.duration_since(frame.decoded_at).as_micros() as u64,
-                        Relaxed,
-                    );
+                    // Decode to handoff: both the worst frame and the
+                    // standing average, so the HUD shows which.
+                    let decode_to_handoff_us = now.duration_since(frame.decoded_at).as_micros() as u64;
+                    METRICS.decode_to_handoff_max_us.fetch_max(decode_to_handoff_us, Relaxed);
+                    METRICS.decode_to_handoff_sum_us.fetch_add(decode_to_handoff_us, Relaxed);
+                    METRICS.decode_to_handoff_count.fetch_add(1, Relaxed);
                     frame.handed_off_at = Some(now);
                     latest.push_back((id, frame));
                     METRICS.handoffs.fetch_add(1, Relaxed);

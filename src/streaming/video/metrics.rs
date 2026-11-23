@@ -26,7 +26,14 @@ pub(crate) struct VideoMetrics {
     pub(crate) handoffs: AtomicU64,
     pub(crate) ui_overwrites: AtomicU64,
     pub(crate) decode_to_handoff_max_us: AtomicU64,
+    /// Decode to handoff, summed over the interval, so the HUD can show
+    /// the average. The max is the worst frame of the second; the average
+    /// is the standing delay.
+    pub(crate) decode_to_handoff_sum_us: AtomicU64,
+    pub(crate) decode_to_handoff_count: AtomicU64,
     pub(crate) handoff_to_upload_max_us: AtomicU64,
+    pub(crate) handoff_to_upload_sum_us: AtomicU64,
+    pub(crate) handoff_to_upload_count: AtomicU64,
     /// End-to-end age of the frame being displayed: first RTP packet arrival
     /// to upload. This is the number that describes perceived latency.
     pub(crate) frame_age_max_us: AtomicU64,
@@ -801,7 +808,11 @@ pub(crate) static METRICS: VideoMetrics = VideoMetrics {
     handoffs: AtomicU64::new(0),
     ui_overwrites: AtomicU64::new(0),
     decode_to_handoff_max_us: AtomicU64::new(0),
+    decode_to_handoff_sum_us: AtomicU64::new(0),
+    decode_to_handoff_count: AtomicU64::new(0),
     handoff_to_upload_max_us: AtomicU64::new(0),
+    handoff_to_upload_sum_us: AtomicU64::new(0),
+    handoff_to_upload_count: AtomicU64::new(0),
     frame_age_max_us: AtomicU64::new(0),
     frame_age_sum_us: AtomicU64::new(0),
     frame_age_count: AtomicU64::new(0),
@@ -886,6 +897,19 @@ pub fn video_performance_summary() -> String {
         .present_gap_sum_us
         .swap(0, Ordering::Relaxed)
         .checked_div(METRICS.present_gap_count.swap(0, Ordering::Relaxed))
+        .unwrap_or(0);
+    // Decode to handoff and handoff to upload: the standing average of
+    // each, so the HUD shows the typical delay and not only the worst
+    // frame of the second. The max alone understates the backlog.
+    let decode_to_handoff_average = METRICS
+        .decode_to_handoff_sum_us
+        .swap(0, Ordering::Relaxed)
+        .checked_div(METRICS.decode_to_handoff_count.swap(0, Ordering::Relaxed))
+        .unwrap_or(0);
+    let handoff_to_upload_average = METRICS
+        .handoff_to_upload_sum_us
+        .swap(0, Ordering::Relaxed)
+        .checked_div(METRICS.handoff_to_upload_count.swap(0, Ordering::Relaxed))
         .unwrap_or(0);
     let audio_buffer_average = METRICS
         .audio_buffer_sum_ms
@@ -976,7 +1000,7 @@ pub fn video_performance_summary() -> String {
     let _ = repair_wait_ms;
     let audio_lost_ms = METRICS.audio_lost_ms.load(Ordering::Relaxed).clamp(-999, 999);
     format!(
-        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{} rmb:{} stut:{av_stalls} a-def:{audio_lost_ms} in-rate:{input_rate}/s in-wire:{input_wire_avg_us}/{input_wire_max_us}us\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us a-srv:{audio_offset_ms}ms\nsrv:{server_offset_ms}ms drift:{server_drift_ms}ms av-lag:{av_lag_ms}ms ld:{av_lag_drift_ms}ms av-d:{av_out_ms}ms a-del:{audio_delay_ms}ms holes:{holes_ms}ms pic:{picture_age_ms}ms ip:{input_probe_ms}ms",
+        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{} rmb:{} stut:{av_stalls} a-def:{audio_lost_ms} in-rate:{input_rate}/s in-wire:{input_wire_avg_us}/{input_wire_max_us}us\nhandoff:{} ui-ovr:{} d>h/h>u:{}/{}us h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us a-srv:{audio_offset_ms}ms\nsrv:{server_offset_ms}ms drift:{server_drift_ms}ms av-lag:{av_lag_ms}ms ld:{av_lag_drift_ms}ms av-d:{av_out_ms}ms a-del:{audio_delay_ms}ms holes:{holes_ms}ms pic:{picture_age_ms}ms ip:{input_probe_ms}ms",
         METRICS.decoded.swap(0, Ordering::Relaxed),
         METRICS.presented.swap(0, Ordering::Relaxed),
         METRICS.decode_us.load(Ordering::Relaxed),
@@ -994,7 +1018,9 @@ pub fn video_performance_summary() -> String {
         METRICS.bandwidth_estimate_kbps.load(Ordering::Relaxed),
         METRICS.handoffs.swap(0, Ordering::Relaxed),
         METRICS.ui_overwrites.swap(0, Ordering::Relaxed),
+        decode_to_handoff_average,
         METRICS.decode_to_handoff_max_us.swap(0, Ordering::Relaxed),
+        handoff_to_upload_average,
         METRICS.handoff_to_upload_max_us.swap(0, Ordering::Relaxed),
         METRICS.frame_age_max_us.swap(0, Ordering::Relaxed),
         METRICS.input_lag_max_us.swap(0, Ordering::Relaxed),
