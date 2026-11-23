@@ -629,6 +629,26 @@ impl VideoRtp {
         }
         self.last_frame_timestamp = Some(completed.timestamp);
 
+        // The input probe: the first picture that could only have been
+        // captured after the controller changed. The time from the change
+        // until this picture landed is the server's half of the round
+        // trip - simulation, capture, encode and network - which no other
+        // number covers. Any frame answers it, not only a keyframe, so it
+        // is not tied to the keyframe cadence.
+        if let Some(probe) = crate::streaming::video::metrics::take_input_probe() {
+            let newer_ms = completed.timestamp.wrapping_sub(probe.video_ts) as i64 * 1_000
+                / i64::from(VIDEO_RTP_CLOCK_RATE);
+            if (0..=PROBE_MAX_NEWER_MS).contains(&newer_ms) {
+                crate::streaming::video::metrics::record_input_probe(
+                    probe.sampled_at,
+                    Instant::now(),
+                    completed.first_packet_at.elapsed(),
+                );
+            } else {
+                crate::streaming::video::metrics::note_rejected_input_probe();
+            }
+        }
+
         let unit = inspect_h264_access_unit(&data);
         if unit.has_idr {
             // The picture we asked for has landed: how long did it take?

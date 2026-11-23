@@ -99,6 +99,12 @@ pub(crate) struct RtcSession<B: RtcSessionBackend> {
 }
 
 impl<B: RtcSessionBackend> RtcSession<B> {
+    /// The newest video timestamp that was received, so the input probe
+    /// knows which pictures can only have been captured after the input.
+    pub(crate) fn last_video_timestamp(&self) -> Option<u32> {
+        self.video.last_video_timestamp()
+    }
+
     pub async fn new(
         mut peer: RTCPeerConnection,
         backend: B,

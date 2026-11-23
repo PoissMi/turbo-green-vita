@@ -108,6 +108,21 @@ pub(crate) struct VideoMetrics {
     pub(crate) input_wire_sum_us: AtomicU64,
     pub(crate) input_wire_max_us: AtomicU64,
     pub(crate) input_wire_count: AtomicU64,
+    /// A distinctive input change waiting for the picture it causes. The
+    /// time from the change until the first frame that could have been
+    /// captured after it is the input→photon round trip.
+    pub(crate) input_probe_armed_at: Mutex<Option<InputProbe>>,
+    /// How long the last input probe took.
+    pub(crate) input_probe_last_us: AtomicU64,
+    /// The fastest input probe of the session.
+    pub(crate) input_probe_min_us: AtomicU64,
+    /// The same with the picture's time on the wire taken out.
+    pub(crate) input_probe_net_last_us: AtomicU64,
+    pub(crate) input_probe_net_min_us: AtomicU64,
+    /// Probes that produced a measurement.
+    pub(crate) input_probe_count: AtomicU64,
+    /// Probes thrown away because the picture predates the input.
+    pub(crate) input_probe_rejected: AtomicU64,
     /// Input reports handed to the data channel.
     pub(crate) input_sent: AtomicU64,
     /// How far the video's game tick has fallen behind the audio's, in
@@ -726,10 +741,59 @@ pub(crate) fn record_keyframe_probe(sent_at: Instant, arrived_at: Instant, on_th
     METRICS.probe_count.fetch_add(1, Ordering::Relaxed);
 }
 
-/// A probe result that was thrown away: the picture was not captured after
-/// the request, so it says nothing about how long a request takes.
+/// Records a probe result that was thrown away because the picture it
+/// brought back was not captured after the request went out.
 pub(crate) fn note_rejected_probe() {
     METRICS.probe_rejected.fetch_add(1, Ordering::Relaxed);
+}
+
+/// A distinctive input event waiting for the picture it causes.
+///
+/// To measure input→photon end to end, the client marks a moment it knows
+/// the content of - a sudden change in the controller state - and times
+/// how long until a frame that can only have been captured *after* that
+/// change lands. The difference is the server's simulation time plus
+/// the capture, encode and network time, which is the part of the round
+/// trip no other number on the screen covers: `in-lag` stops when the
+/// report leaves the client, and `kp` measures a keyframe request, not
+/// an input.
+pub(crate) struct InputProbe {
+    /// When the change was sampled.
+    pub sampled_at: Instant,
+    /// The newest video timestamp the client had seen at that moment.
+    pub video_ts: u32,
+}
+
+/// Arms the input probe.
+pub(crate) fn arm_input_probe(sampled_at: Instant, video_ts: u32) {
+    if let Ok(mut slot) = METRICS.input_probe_armed_at.lock() {
+        *slot = Some(InputProbe { sampled_at, video_ts });
+    }
+}
+
+/// Takes the armed input probe, if there is one.
+pub(crate) fn take_input_probe() -> Option<InputProbe> {
+    METRICS
+        .input_probe_armed_at
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+}
+
+/// Records how long the input probe took to come back as a picture.
+pub(crate) fn record_input_probe(sampled_at: Instant, arrived_at: Instant, on_the_wire: Duration) {
+    let elapsed_us = arrived_at.saturating_duration_since(sampled_at).as_micros() as u64;
+    METRICS.input_probe_last_us.store(elapsed_us, Ordering::Relaxed);
+    METRICS.input_probe_min_us.fetch_min(elapsed_us, Ordering::Relaxed);
+    let net_us = elapsed_us.saturating_sub(on_the_wire.as_micros() as u64);
+    METRICS.input_probe_net_last_us.store(net_us, Ordering::Relaxed);
+    METRICS.input_probe_net_min_us.fetch_min(net_us, Ordering::Relaxed);
+    METRICS.input_probe_count.fetch_add(1, Ordering::Relaxed);
+}
+
+/// A probe result that was thrown away.
+pub(crate) fn note_rejected_input_probe() {
+    METRICS.input_probe_rejected.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Notes that the client held a damaged frame for this long waiting for its
@@ -809,6 +873,13 @@ pub(crate) static METRICS: VideoMetrics = VideoMetrics {
     input_wire_sum_us: AtomicU64::new(0),
     input_wire_max_us: AtomicU64::new(0),
     input_wire_count: AtomicU64::new(0),
+    input_probe_armed_at: Mutex::new(None),
+    input_probe_last_us: AtomicU64::new(0),
+    input_probe_min_us: AtomicU64::new(u64::MAX),
+    input_probe_net_last_us: AtomicU64::new(0),
+    input_probe_net_min_us: AtomicU64::new(u64::MAX),
+    input_probe_count: AtomicU64::new(0),
+    input_probe_rejected: AtomicU64::new(0),
     input_sent: AtomicU64::new(0),
     av_lag_us: AtomicI64::new(0),
     av_lag_drift_us: AtomicI64::new(0),
@@ -868,18 +939,42 @@ pub fn video_performance_summary() -> String {
         .unwrap_or(0);
     let server_offset_ms = (METRICS.server_offset_us.load(Ordering::Relaxed) / 1000).clamp(-999, 999);
     let server_drift_ms = (METRICS.server_drift_us.load(Ordering::Relaxed) / 1000).clamp(-999, 999);
+    // The input→photon round trip: from a sampled controller change until
+    // the first picture that could have been captured after it landed, in
+    // milliseconds. This is the half of the loop no other number covers:
+    // `in-lag` stops when the report leaves the client, and `kp` measures
+    // a keyframe request rather than an input. Latest first, then the
+    // session minimum.
+    let input_probe_count = METRICS.input_probe_count.load(Ordering::Relaxed);
+    let input_probe_min_us = METRICS.input_probe_net_min_us.load(Ordering::Relaxed);
+    let input_probe_last_us = METRICS.input_probe_net_last_us.load(Ordering::Relaxed);
+    let input_probe_ms = if input_probe_count == 0 {
+        "?/?".to_owned()
+    } else {
+        format!("{}/{}", (input_probe_last_us / 1000).min(999), (input_probe_min_us / 1000).min(999))
+    };
     // The receive batch is not on the HUD any more, but the counters are
     // still reset so that they keep counting per interval.
     let _ = METRICS.rx_batch_sum.swap(0, Ordering::Relaxed);
     let _ = METRICS.rx_batch_count.swap(0, Ordering::Relaxed);
     let _ = METRICS.rx_batch_max.swap(0, Ordering::Relaxed);
-    // Reset the input counters even though they are not on the HUD line any
-    // more: the input is exonerated and the line is needed for the A/V
-    // numbers.
-    let _ = METRICS.input_wire_sum_us.swap(0, Ordering::Relaxed);
-    let _ = METRICS.input_wire_max_us.swap(0, Ordering::Relaxed);
-    let _ = METRICS.input_wire_count.swap(0, Ordering::Relaxed);
-    let _ = METRICS.input_sent.swap(0, Ordering::Relaxed);
+    // How often the input is actually leaving the client, in reports per
+    // second. This is the number that says whether the input wire is
+    // dropping reports: the controller is polled at 250 Hz, and a
+    // healthy wire carries them at something close to that. A falling
+    // rate is a lossy channel, which is invisible in every other number
+    // on this screen because `input_sent` was counted and thrown away.
+    //
+    // The wire wait is also the client's half of the input delay: the gap
+    // between a report being queued and its packet hitting the socket.
+    let input_rate = METRICS.input_sent.swap(0, Ordering::Relaxed).min(999);
+    let input_wire_count = METRICS.input_wire_count.swap(0, Ordering::Relaxed);
+    let input_wire_avg_us = METRICS
+        .input_wire_sum_us
+        .swap(0, Ordering::Relaxed)
+        .checked_div(input_wire_count)
+        .unwrap_or(0);
+    let input_wire_max_us = METRICS.input_wire_max_us.swap(0, Ordering::Relaxed);
     // How far the picture is behind the sound, in milliseconds. Positive
     // means the picture is late.
     let av_lag_ms = (METRICS.av_lag_us.load(Ordering::Relaxed) / 1000).clamp(-999, 999);
@@ -944,7 +1039,7 @@ pub fn video_performance_summary() -> String {
     let _ = (probe_ok, probe_no, repair_wait_ms);
     let audio_lost_ms = METRICS.audio_lost_ms.load(Ordering::Relaxed).clamp(-999, 999);
     format!(
-        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{} rmb:{} stut:{av_stalls} a-def:{audio_lost_ms}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us a-srv:{audio_offset_ms}ms\nsrv:{server_offset_ms}ms drift:{server_drift_ms}ms av-lag:{av_lag_ms}ms ld:{av_lag_drift_ms}ms av-d:{av_out_ms}ms a-del:{audio_delay_ms}ms holes:{holes_ms}ms kp:{probe_ms}ms",
+        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{} rmb:{} stut:{av_stalls} a-def:{audio_lost_ms} in-rate:{input_rate}/s in-wire:{input_wire_avg_us}/{input_wire_max_us}us\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us a-srv:{audio_offset_ms}ms\nsrv:{server_offset_ms}ms drift:{server_drift_ms}ms av-lag:{av_lag_ms}ms ld:{av_lag_drift_ms}ms av-d:{av_out_ms}ms a-del:{audio_delay_ms}ms holes:{holes_ms}ms kp:{probe_ms}ms ip:{input_probe_ms}ms",
         METRICS.decoded.swap(0, Ordering::Relaxed),
         METRICS.presented.swap(0, Ordering::Relaxed),
         METRICS.decode_us.load(Ordering::Relaxed),

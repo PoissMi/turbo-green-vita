@@ -424,11 +424,25 @@ fn send_sampled_gamepad_frame<B: super::session::RtcSessionBackend>(
         .input_lag_count
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+    // A sudden controller change is a moment the client knows the content
+    // of, so the first picture that could have been captured after it
+    // landing fixes the server's half of the round trip: the time from
+    // the change until that picture shows up is the input→photon delay,
+    // which no other number on the screen covers.
+    let changed = last_sent
+        .as_ref()
+        .is_some_and(|(previous, _)| *previous != sampled.frame);
+
     if session
         .backend
         .send_gamepad_frame(&mut session.peer, sampled.frame.clone())
     {
-        *last_sent = Some((sampled.frame, now));
+        *last_sent = Some((sampled.frame.clone(), now));
+    }
+
+    if changed {
+        let video_ts = session.last_video_timestamp().unwrap_or(0);
+        crate::streaming::video::metrics::arm_input_probe(now, video_ts);
     }
 }
 
