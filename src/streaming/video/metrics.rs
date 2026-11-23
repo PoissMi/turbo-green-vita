@@ -787,13 +787,29 @@ pub(crate) fn arm_input_probe(sampled_at: Instant, video_ts: u32) {
     }
 }
 
-/// Takes the armed input probe, if there is one.
-pub(crate) fn take_input_probe() -> Option<InputProbe> {
-    METRICS
-        .input_probe_armed_at
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.take())
+/// Peeks at the armed input probe, if there is one.
+///
+/// The probe is peeked rather than taken: the first picture that answers
+/// it is the first one new enough, and the pictures in between are too
+/// old to have been caused by the input and must be skipped, not
+/// consumed. Taking the probe on the first frame threw it away at once
+/// and left the HUD at `?/?` forever.
+pub(crate) fn peek_input_probe() -> Option<InputProbe> {
+    if let Ok(slot) = METRICS.input_probe_armed_at.lock() {
+        return slot.as_ref().map(|probe| InputProbe {
+            sampled_at: probe.sampled_at,
+            video_ts: probe.video_ts,
+            min_newer_ms: probe.min_newer_ms,
+        });
+    }
+    None
+}
+
+/// Clears the armed input probe once it has been answered or rejected.
+pub(crate) fn clear_input_probe() {
+    if let Ok(mut slot) = METRICS.input_probe_armed_at.lock() {
+        *slot = None;
+    }
 }
 
 /// Records how long the input probe took to come back as a picture.

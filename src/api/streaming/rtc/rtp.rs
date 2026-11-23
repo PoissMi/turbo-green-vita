@@ -635,22 +635,24 @@ impl VideoRtp {
         // trip - simulation, capture, encode and network - which no other
         // number covers. Any frame answers it, not only a keyframe, so it
         // is not tied to the keyframe cadence.
-        if let Some(probe) = crate::streaming::video::metrics::take_input_probe() {
+        // The probe is *peeked*, not taken: the first picture newer than
+        // the input's causality floor answers it, and the pictures in
+        // between are too old to have been caused by the input, so they
+        // must be skipped, not consumed. Taking one here threw the probe
+        // away on the very next frame and `ip` never left `?/?`.
+        if let Some(probe) = crate::streaming::video::metrics::peek_input_probe() {
             let newer_ms = completed.timestamp.wrapping_sub(probe.video_ts) as i64 * 1_000
                 / i64::from(VIDEO_RTP_CLOCK_RATE);
-            // The picture must also be newer than the round trip of the
-            // picture path itself. A picture captured sooner than that
-            // cannot have been caused by the input, and taking it would
-            // read as a few milliseconds when the real round trip is
-            // hundreds.
             if newer_ms >= probe.min_newer_ms && newer_ms <= PROBE_MAX_NEWER_MS {
                 crate::streaming::video::metrics::record_input_probe(
                     probe.sampled_at,
                     Instant::now(),
                     completed.first_packet_at.elapsed(),
                 );
-            } else {
+                crate::streaming::video::metrics::clear_input_probe();
+            } else if newer_ms > PROBE_MAX_NEWER_MS {
                 crate::streaming::video::metrics::note_rejected_input_probe();
+                crate::streaming::video::metrics::clear_input_probe();
             }
         }
 
