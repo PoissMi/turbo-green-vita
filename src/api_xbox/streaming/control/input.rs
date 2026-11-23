@@ -72,6 +72,16 @@ impl InputPacket {
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(self.total_size);
+        // u16 report type, u32 sequence, f64 uptime = 14 bytes. The
+        // second-hand protocol summary says the report type is u32 and
+        // the sequence u16, which would put the report type at offset 0
+        // and the sequence at offset 4 - but the parser this client
+        // already runs against the live server (`parse_server_video_size`)
+        // reads the report type as u16 at offset 0 and the sequence
+        // region at offset 2, and the actual greenlight `InputPacket`
+        // writes u16 + u32 too. The initial commit of this repo did the
+        // same. Swapping the header on a summary would break the one
+        // direction that is known to work, so this stays.
         push_le(&mut bytes, self.report_type.to_le_bytes());
         push_le(&mut bytes, self.sequence.to_le_bytes());
         // Uptime stamp in milliseconds, the same shape the reference client

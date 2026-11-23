@@ -19,7 +19,12 @@ const GAMEPAD_PULSE_DURATION: Duration = Duration::from_millis(100);
 /// How often the controller state is refreshed even when nothing changes.
 /// The reference client polls the pad every 16 ms and reports that often, so
 /// the server always has a recent state to work with.
-const GAMEPAD_REFRESH_INTERVAL: Duration = Duration::from_millis(16);
+/// How often the controller state is refreshed even when nothing changes.
+/// The reference client polls the pad every 8 ms (125 Hz) and reports it
+/// just as often, so the server is always acting on a state no more than
+/// 8 ms old. It was 16 ms here, which is why `in-rate` read ~50/s on the
+/// HUD: that was the refresh interval, not the wire.
+const GAMEPAD_REFRESH_INTERVAL: Duration = Duration::from_millis(8);
 const MAX_PENDING_COMMANDS: usize = 16;
 const MAX_PENDING_EVENTS: usize = 32;
 const MAX_PENDING_AUDIO_BATCHES: usize = 16;
