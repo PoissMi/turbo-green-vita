@@ -187,11 +187,25 @@ fn push_le<const N: usize>(bytes: &mut Vec<u8>, raw: [u8; N]) {
     bytes.extend_from_slice(&raw);
 }
 
-/// Batches queued frames into [`InputPacket`]s, one wire packet per send.
+/// One report per send, carrying the latest controller state.
+///
+/// The queue used to batch: `queue_gamepad_frames` extended a `Vec` and
+/// `drain_packet` took the whole `Vec` into one packet. Under load the
+/// caller can deliver several sampled states between two sends, so the
+/// packet carried 2–3 frames and the server read the last one - which is
+/// the oldest of the batch plus whatever was sampled in between. That is
+/// latency the wire never shows, because the report that leaves the
+/// client is already late.
+///
+/// Now the queue holds exactly one frame: the newest sampled state. An
+/// older state that arrives before the queue drains is superseded, never
+/// batched. The server always acts on the freshest state the client has,
+/// which is the whole point of a gamepad report.
 #[derive(Debug)]
 pub struct InputQueue {
     sequence: u32,
-    gamepads: Vec<GamepadFrame>,
+    /// The newest sampled controller state, held until the next send.
+    gamepad: Option<GamepadFrame>,
     pointers: Vec<PointerFrame>,
     /// Base for the uptime stamp in every report.
     started_at: Instant,
@@ -201,7 +215,7 @@ impl Default for InputQueue {
     fn default() -> Self {
         Self {
             sequence: 0,
-            gamepads: Vec::new(),
+            gamepad: None,
             pointers: Vec::new(),
             started_at: Instant::now(),
         }
@@ -214,7 +228,14 @@ impl InputQueue {
         frames: impl IntoIterator<Item = GamepadFrame>,
         force_send: bool,
     ) -> Option<Vec<u8>> {
-        self.gamepads.extend(frames);
+        // The queue holds the newest sampled state only. Frames that
+        // arrive between two sends are superseded rather than batched:
+        // the server should act on the freshest state, not on the last
+        // one in a batch the client assembled while it was busy.
+        for frame in frames {
+            let _stale = self.gamepad.take();
+            self.gamepad = Some(frame);
+        }
         self.check_queue_and_packet(force_send)
     }
 
@@ -233,14 +254,14 @@ impl InputQueue {
     }
 
     fn check_queue_and_packet(&mut self, force_send: bool) -> Option<Vec<u8>> {
-        let should_send = force_send || !self.gamepads.is_empty() || !self.pointers.is_empty();
+        let should_send = force_send || self.gamepad.is_some() || !self.pointers.is_empty();
         should_send.then(|| self.drain_packet())
     }
 
     fn drain_packet(&mut self) -> Vec<u8> {
         let mut packet = InputPacket::new(self.next_sequence(), self.started_at);
         packet.set_data(
-            std::mem::take(&mut self.gamepads),
+            self.gamepad.take().into_iter().collect(),
             std::mem::take(&mut self.pointers),
         );
         packet.to_bytes()
