@@ -21,7 +21,6 @@ pub(super) struct XboxRtcProtocol {
     max_bitrate_kbps: u32,
     video_width: u32,
     video_height: u32,
-    video_fps: u32,
     channel_ids: ChannelIds,
 }
 
@@ -31,7 +30,6 @@ impl XboxRtcProtocol {
         max_bitrate_kbps: u32,
         video_width: u32,
         video_height: u32,
-        video_fps: u32,
     ) -> Self {
         Self {
             handshake_stage: HandshakeStage::WaitingForChannels,
@@ -41,7 +39,6 @@ impl XboxRtcProtocol {
             max_bitrate_kbps,
             video_width,
             video_height,
-            video_fps,
             channel_ids,
         }
     }
@@ -107,7 +104,6 @@ impl XboxRtcProtocol {
             self.max_bitrate_kbps,
             self.video_width,
             self.video_height,
-            self.video_fps,
             &mut self.handshake_stage,
             channel_id,
             data,

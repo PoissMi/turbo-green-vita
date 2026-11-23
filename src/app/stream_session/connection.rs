@@ -225,7 +225,6 @@ impl App {
                     title_id,
                     session.return_selected,
                     self.settings.max_bitrate.kbps(),
-                    crate::api::streaming::rtc::session::REQUESTED_VIDEO_FPS,
                 ) {
                     Ok(streaming) => Ok(AppState::Streaming(streaming)),
                     Err(error) => {

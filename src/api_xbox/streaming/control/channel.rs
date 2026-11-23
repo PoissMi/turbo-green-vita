@@ -19,7 +19,6 @@ pub(in crate::api_xbox::streaming) fn handle_data_channel_message(
     max_bitrate_kbps: u32,
     video_width: u32,
     video_height: u32,
-    video_fps: u32,
     handshake_stage: &mut HandshakeStage,
     channel_id: RTCDataChannelId,
     data: &[u8],
@@ -42,11 +41,11 @@ pub(in crate::api_xbox::streaming) fn handle_data_channel_message(
         // capabilities `supportsFps` field only sometimes, and the video
         // preference is the message that names the frame rate directly.
         let _ = control_channel.send_text(
-            video_preference(video_width, video_height, video_fps).to_string(),
+            video_preference(video_width, video_height).to_string(),
         );
     }
     if let Some(mut message_channel) = pc.data_channel(ids.message) {
-        for message in startup_messages(max_bitrate_kbps, video_width, video_height, video_fps) {
+        for message in startup_messages(max_bitrate_kbps, video_width, video_height) {
             let _ = message_channel.send_text(message.to_string());
         }
     }
@@ -135,12 +134,12 @@ pub fn video_keyframe_requested(ifr_requested: bool) -> Value {
 /// for 30 fps is still sent 60. The frame rate is one fixed number, so
 /// this exists to keep the messages complete rather than to ask for
 /// anything.
-pub fn video_preference(width: u32, height: u32, fps: u32) -> Value {
+pub fn video_preference(width: u32, height: u32) -> Value {
     json!({
         "type": "VideoPreference",
         "width": width,
         "height": height,
-        "fps": fps,
+        "fps": crate::api::streaming::rtc::session::REQUESTED_VIDEO_FPS,
         "videoCodec": "H264",
         "colorSpaceFlags": 0,
     })
@@ -169,7 +168,6 @@ pub fn startup_messages(
     max_bitrate_kbps: u32,
     width: u32,
     height: u32,
-    video_fps: u32,
 ) -> Vec<Value> {
     vec![
         generate_message(
@@ -197,7 +195,7 @@ pub fn startup_messages(
                 "supportsCustomResolution": true,
                 "supportsHevc": false,
                 "supportsHdr": false,
-                "supportsFps": video_fps,
+                "supportsFps": crate::api::streaming::rtc::session::REQUESTED_VIDEO_FPS,
                 "maxWidth": width,
                 "maxHeight": height,
                 "maxBitrateKbps": max_bitrate_kbps,

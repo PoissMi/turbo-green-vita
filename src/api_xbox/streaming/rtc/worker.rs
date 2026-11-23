@@ -14,7 +14,6 @@ use rtc::peer_connection::sdp::RTCSessionDescription;
 struct XboxRtcWorkerProvider {
     stream: Stream,
     max_bitrate_kbps: u32,
-    video_fps: u32,
 }
 
 impl RtcWorkerProvider for XboxRtcWorkerProvider {
@@ -25,7 +24,6 @@ impl RtcWorkerProvider for XboxRtcWorkerProvider {
             self.max_bitrate_kbps,
             STREAM_WIDTH,
             STREAM_HEIGHT,
-            self.video_fps,
         )
     }
 
@@ -36,7 +34,6 @@ impl RtcWorkerProvider for XboxRtcWorkerProvider {
             audio_sample_rate: AUDIO_SAMPLE_RATE as u32,
             audio_payload_type: AUDIO_PAYLOAD_TYPE,
             max_video_bitrate_kbps: self.max_bitrate_kbps,
-            video_fps: self.video_fps,
             decoder: DecoderConfig {
                 decode_width: STREAM_WIDTH,
                 decode_height: STREAM_HEIGHT,
@@ -120,10 +117,9 @@ fn set_max_video_bitrate(sdp: &str, kbps: u32) -> String {
     lines.join("\n")
 }
 
-pub(crate) fn spawn(stream: Stream, max_bitrate_kbps: u32, video_fps: u32) -> Result<RtcWorker> {
+pub(crate) fn spawn(stream: Stream, max_bitrate_kbps: u32) -> Result<RtcWorker> {
     RtcWorker::spawn(XboxRtcWorkerProvider {
         stream,
         max_bitrate_kbps,
-        video_fps,
     })
 }

@@ -56,9 +56,6 @@ pub(crate) struct RtcSessionConfig {
     pub audio_sample_rate: u32,
     pub audio_payload_type: u8,
     pub max_video_bitrate_kbps: u32,
-    /// The frame rate asked for from the server. Shown in the HUD so the
-    /// requested rate can be compared with the one the server delivers.
-    pub video_fps: u32,
     pub decoder: DecoderConfig,
 }
 
@@ -89,8 +86,6 @@ pub(crate) struct RtcSession<B: RtcSessionBackend> {
     pub(crate) video: VideoReceiver,
     pub(crate) audio: AudioReceiver,
     max_video_bitrate_kbps: u32,
-    /// The frame rate we asked the server for.
-    video_fps: u32,
     /// What we currently ask the server for. The user's setting is the
     /// ceiling; this is what the path has actually proven it can carry.
     bandwidth_estimate_kbps: u32,
@@ -128,7 +123,6 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             video,
             audio: AudioReceiver::new(config.audio_sample_rate, config.audio_payload_type),
             max_video_bitrate_kbps: config.max_video_bitrate_kbps,
-            video_fps: config.video_fps,
             bandwidth_estimate_kbps: config.max_video_bitrate_kbps,
             last_bandwidth_report: None,
             last_keyframe_request: None,
@@ -216,7 +210,7 @@ impl<B: RtcSessionBackend> RtcSession<B> {
                 .unwrap_or_else(|| "srv:?".to_owned());
             self.status = format!(
                 "cap:{}kbps fps:{} {server} {status}",
-                self.max_video_bitrate_kbps, self.video_fps
+                self.max_video_bitrate_kbps, REQUESTED_VIDEO_FPS
             );
             eprintln!("{}", self.status);
         }

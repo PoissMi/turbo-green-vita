@@ -36,9 +36,8 @@ impl StreamingSession {
         title_id: Option<String>,
         return_selected: usize,
         max_bitrate_kbps: u32,
-        video_fps: u32,
     ) -> Result<Self> {
-        let backend = PlaybackBackend::start_xbox(stream, max_bitrate_kbps, video_fps)?;
+        let backend = PlaybackBackend::start_xbox(stream, max_bitrate_kbps)?;
         let return_target = match kind {
             StreamKind::Cloud => StreamReturnTarget::Titles(return_selected),
             StreamKind::Home => StreamReturnTarget::Consoles(return_selected),
