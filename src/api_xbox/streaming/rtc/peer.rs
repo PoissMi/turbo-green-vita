@@ -48,9 +48,25 @@ pub(super) fn create(
 
     Ok((
         peer_connection,
-        XboxRtcProtocol::new(channel_ids, max_bitrate_kbps, video_width, video_height),
+        XboxRtcProtocol::new(
+            channel_ids,
+            max_bitrate_kbps,
+            video_width,
+            video_height,
+        ),
     ))
 }
+
+/// The H.264 parameters we offer, which tell the server what it may send.
+///
+/// `max-fs` is the frame size in macroblocks: 3600 is 1280x720. `max-mbps`
+/// is the frame rate in macroblocks per second, so 216000 is 60 fps.
+///
+/// The server does not take the frame rate from what we ask: the upstream
+/// client asked for 30 fps and was sent 60 fps anyway, and this client
+/// asks for 60 and is sent 60. So this is one line, not a choice - and
+/// the only thing left to lower the server's load is the bitrate.
+const VIDEO_FMTP_LINE: &str = "level-asymmetry-allowed=0;packetization-mode=1;profile-level-id=42e020;max-fs=3600;max-mbps=216000";
 
 fn register_vita_codecs(media_engine: &mut MediaEngine) -> Result<()> {
     media_engine.register_codec(
@@ -73,9 +89,7 @@ fn register_vita_codecs(media_engine: &mut MediaEngine) -> Result<()> {
                 mime_type: MIME_TYPE_H264.to_owned(),
                 clock_rate: 90_000,
                 channels: 0,
-                sdp_fmtp_line:
-                    "level-asymmetry-allowed=0;packetization-mode=1;profile-level-id=42e020;max-fs=3600;max-mbps=216000"
-                        .to_owned(),
+                sdp_fmtp_line: VIDEO_FMTP_LINE.to_owned(),
                 rtcp_feedback: vec![
                     RTCPFeedback {
                         typ: "goog-remb".to_owned(),

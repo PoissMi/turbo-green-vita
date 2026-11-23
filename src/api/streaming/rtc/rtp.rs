@@ -17,11 +17,25 @@ const MAX_PENDING_AUDIO_PACKETS: usize = 32;
 const MAX_H264_ACCESS_UNIT_BYTES: usize = 2 * 1024 * 1024;
 const VIDEO_RTP_CLOCK_RATE: u32 = 90_000;
 const AUDIO_MAX_LATE_PACKETS: u16 = 32;
+/// How long the jitter buffer waits for a late audio packet before it gives
+/// up on it.
+///
+/// It was 20 ms in 0.4.10, which is exactly one 20 ms Opus frame, and the
+/// sound was terrible: a packet one frame late is *dropped* instead of
+/// held, so every late packet became a hole, and the player heard holes.
+/// 40 ms is two frames of slack, which is what a late packet actually
+/// needs; the standing delay comes from the device queue and the decoded
+/// pipeline, not from this.
+const AUDIO_JITTER_DEADLINE_MS: u64 = 40;
 const LOW_FPS_DAMAGE_LIMIT: u8 = 8;
 const HIGH_FPS_DAMAGE_LIMIT: u8 = 3;
 /// Frames kept in the reassembly queue while the head frame waits for its
 /// missing packets.
 const MAX_REORDER_FRAMES: usize = 3;
+/// A keyframe probe only counts when the picture it brought back was
+/// captured this close after the request. Anything older was on its way
+/// already and says nothing about how long a request takes.
+const PROBE_MAX_NEWER_MS: i64 = 250;
 /// How long an incomplete frame may wait for a retransmitted packet before it
 /// is abandoned. A Wi-Fi round trip is 10-40 ms, so 120 ms is generous while
 /// still bounding how stale the pipeline can become.
@@ -40,18 +54,40 @@ pub(super) struct VideoSampleStats {
 pub(super) struct AudioRtp {
     samples: SampleBuilder<OpusPacket>,
     payload_type: u8,
+    /// The RTP clock rate of the audio stream, used to turn its timestamps
+    /// into game time.
+    sample_rate: u32,
+    /// Packets handed to the jitter buffer, and samples taken out of it.
+    /// The difference is the audio still waiting there.
+    pushed: u64,
+    popped: u64,
+    /// The first and newest RTP timestamp, used to work out how long one
+    /// audio packet lasts.
+    first_timestamp: Option<u32>,
+    newest_timestamp: Option<u32>,
 }
 
 impl AudioRtp {
     pub(super) fn new(sample_rate: u32, payload_type: u8) -> Self {
         Self {
-            // The jitter buffer used to hold 80 ms of audio, which is 80 ms
+            // The jitter buffer used to hold 30 ms of audio, which is 30 ms
             // the sound lags the picture by before the device buffer is even
             // counted. The video path measures sub-millisecond packet
             // reordering, so 30 ms is still generous slack.
+            //
+            // It is also the point where late audio is thrown away: the
+            // buffer drops what it cannot assemble in time, and a hole in
+            // the audio timeline is a hole in the sound - the picture then
+            // looks late even though it is not. So the buffer is given
+            // room to wait for a late packet instead of dropping it.
             samples: SampleBuilder::new(AUDIO_MAX_LATE_PACKETS, OpusPacket, sample_rate)
-                .with_max_time_delay(Duration::from_millis(30)),
+                .with_max_time_delay(Duration::from_millis(AUDIO_JITTER_DEADLINE_MS)),
             payload_type,
+            sample_rate,
+            pushed: 0,
+            popped: 0,
+            first_timestamp: None,
+            newest_timestamp: None,
         }
     }
 
@@ -60,13 +96,52 @@ impl AudioRtp {
             return;
         }
 
+        // The audio packet's game tick. The audio is mixed straight from the
+        // game clock, so it is the reference the video is compared against.
+        crate::streaming::video::metrics::observe_audio_tick(
+            packet.header.timestamp,
+            self.sample_rate,
+            Instant::now(),
+        );
+
+        self.pushed += 1;
+        let first = *self.first_timestamp.get_or_insert(packet.header.timestamp);
+        self.newest_timestamp = Some(packet.header.timestamp);
         self.samples.push(packet);
         while audio_packets.len() < MAX_PENDING_AUDIO_PACKETS {
             let Some(sample) = self.samples.pop() else {
                 break;
             };
+            self.popped += 1;
             audio_packets.push(sample.data);
         }
+        self.report_jitter_depth(first);
+    }
+
+    /// How much audio is still waiting in the jitter buffer.
+    ///
+    /// This audio has arrived but has not been decoded yet. It is not lost,
+    /// and it is not heard either, so it has to be taken out of the count
+    /// of missing audio - otherwise a busy moment reads as a hole in the
+    /// sound.
+    fn report_jitter_depth(&self, first_timestamp: u32) {
+        let Some(newest) = self.newest_timestamp else {
+            return;
+        };
+        let held = self.pushed.saturating_sub(self.popped);
+        if held == 0 || self.pushed < 2 {
+            crate::streaming::video::metrics::METRICS
+                .audio_jitter_samples
+                .store(0, Ordering::Relaxed);
+            return;
+        }
+        // How long one audio packet lasts, in RTP samples.
+        let packet_samples = u64::from(newest.wrapping_sub(first_timestamp))
+            / (self.pushed.saturating_sub(1))
+            .max(1);
+        crate::streaming::video::metrics::METRICS
+            .audio_jitter_samples
+            .store(held * packet_samples, Ordering::Relaxed);
     }
 }
 
@@ -262,6 +337,15 @@ impl VideoRtp {
         self.waiting_for_keyframe
     }
 
+    /// The newest video timestamp that was received.
+    ///
+    /// The server's capture point is at this timestamp, so a picture that
+    /// comes back with a much newer one was captured after a request went
+    /// out.
+    pub(super) fn last_video_timestamp(&self) -> Option<u32> {
+        self.last_frame_timestamp
+    }
+
     pub(super) fn wait_for_keyframe(&mut self) {
         self.waiting_for_keyframe = true;
     }
@@ -401,6 +485,12 @@ impl VideoRtp {
         };
         let missing = frame.missing_sequences(None);
         if !missing.is_empty() {
+            // The frame was damaged and the stream was held for it until the
+            // repair window ran out. Every frame behind it waited too, so
+            // this is a freeze the player sees - and one that moves the
+            // picture further behind the sound.
+            let waited_us = frame.first_packet_at.elapsed().as_micros() as u64;
+            crate::streaming::video::metrics::note_repair_wait(waited_us);
             stats.nack_sequence_numbers.extend(missing);
         }
         self.next_sequence = frame.marker_sequence().map(|seq| seq.wrapping_add(1));
@@ -425,6 +515,11 @@ impl VideoRtp {
     /// capture time, so the gap between it and our arrival clock is exactly
     /// that hidden delay. Only its *change* over time matters; the absolute
     /// value carries the network delay.
+    ///
+    /// The origin is the FIRST frame of the session, and the offset is always
+    /// taken against it, so the server's clock and our clock are never
+    /// re-anchored. That is what makes `srv` a real measurement of a growing
+    /// queue rather than a number that resets itself every second.
     fn record_timeline(&mut self, rtp_timestamp: u32, arrived_at: Instant) {
         let Some((origin_ts, origin_wall)) = self.timeline_origin else {
             self.timeline_origin = Some((rtp_timestamp, arrived_at));
@@ -432,9 +527,15 @@ impl VideoRtp {
         };
         let offset_us =
             Self::timeline_offset_us(origin_ts, origin_wall, rtp_timestamp, arrived_at);
-        crate::streaming::video::metrics::METRICS
-            .server_offset_us
-            .store(offset_us, Ordering::Relaxed);
+        // Never store a zero: a zero offset is not a measurement, it is the
+        // absence of one, and storing it erases the real reading every time
+        // a frame happens to land on the origin. The HUD would then read a
+        // healthy number while the picture is half a second late.
+        if offset_us != 0 {
+            crate::streaming::video::metrics::METRICS
+                .server_offset_us
+                .store(offset_us, Ordering::Relaxed);
+        }
 
         // One sample per second is enough to see a queue that grows over
         // minutes, and it keeps the comparison below free of packet jitter.
@@ -450,7 +551,8 @@ impl VideoRtp {
             self.timeline_samples.pop_front();
         }
         // Compare against the sample from about a minute ago: a positive
-        // drift means the video is arriving later and later.
+        // drift means the video is arriving later and later. This is the
+        // number that grows while the user plays, which is the report.
         if let Some((at, ts)) = self
             .timeline_samples
             .iter()
@@ -489,6 +591,13 @@ impl VideoRtp {
         let assembly_us = completed.first_packet_at.elapsed().as_micros() as u64;
         // How late this frame is compared to the server's own timeline.
         self.record_timeline(completed.timestamp, completed.first_packet_at);
+        // The frame's game tick, compared with the audio's to show how far the
+        // video has fallen behind the sound.
+        crate::streaming::video::metrics::observe_video_tick(
+            completed.timestamp,
+            VIDEO_RTP_CLOCK_RATE,
+            completed.first_packet_at,
+        );
         crate::streaming::video::metrics::METRICS
             .rtp_assembly_sum_us
             .fetch_add(assembly_us, Ordering::Relaxed);
@@ -511,6 +620,33 @@ impl VideoRtp {
             );
         }
         self.last_frame_timestamp = Some(completed.timestamp);
+
+        // The input probe: the first picture that could only have been
+        // captured after the controller changed. The time from the change
+        // until this picture landed is the server's half of the round
+        // trip - simulation, capture, encode and network - which no other
+        // number covers. Any frame answers it, not only a keyframe, so it
+        // is not tied to the keyframe cadence.
+        // The probe is *peeked*, not taken: the first picture newer than
+        // the input's causality floor answers it, and the pictures in
+        // between are too old to have been caused by the input, so they
+        // must be skipped, not consumed. Taking one here threw the probe
+        // away on the very next frame and `ip` never left `?/?`.
+        if let Some(probe) = crate::streaming::video::metrics::peek_input_probe() {
+            let newer_ms = completed.timestamp.wrapping_sub(probe.video_ts) as i64 * 1_000
+                / i64::from(VIDEO_RTP_CLOCK_RATE);
+            if newer_ms >= probe.min_newer_ms && newer_ms <= PROBE_MAX_NEWER_MS {
+                crate::streaming::video::metrics::record_input_probe(
+                    probe.sampled_at,
+                    Instant::now(),
+                    completed.first_packet_at.elapsed(),
+                );
+                crate::streaming::video::metrics::clear_input_probe();
+            } else if newer_ms > PROBE_MAX_NEWER_MS {
+                crate::streaming::video::metrics::note_rejected_input_probe();
+                crate::streaming::video::metrics::clear_input_probe();
+            }
+        }
 
         let unit = inspect_h264_access_unit(&data);
         stats.encoded_resolution = unit.resolution;

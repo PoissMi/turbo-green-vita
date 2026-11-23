@@ -223,6 +223,11 @@ impl VideoReceiver {
         }
     }
 
+    /// The newest video timestamp that was received.
+    pub(crate) fn last_video_timestamp(&self) -> Option<u32> {
+        self.rtp.last_video_timestamp()
+    }
+
     pub(crate) fn status(&mut self, now: Instant) -> Option<String> {
         let elapsed = now.duration_since(self.last_stats_report);
         if elapsed < STREAM_STATS_INTERVAL {

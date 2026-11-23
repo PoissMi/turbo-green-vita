@@ -20,7 +20,11 @@ impl RtcWorkerProvider for XboxRtcWorkerProvider {
     type Protocol = XboxRtcProtocol;
 
     fn create_peer(&self) -> Result<(RTCPeerConnection, Self::Protocol)> {
-        peer::create(self.max_bitrate_kbps, STREAM_WIDTH, STREAM_HEIGHT)
+        peer::create(
+            self.max_bitrate_kbps,
+            STREAM_WIDTH,
+            STREAM_HEIGHT,
+        )
     }
 
     fn session_config(&self) -> RtcSessionConfig {

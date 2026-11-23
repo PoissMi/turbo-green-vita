@@ -19,7 +19,12 @@ const GAMEPAD_PULSE_DURATION: Duration = Duration::from_millis(100);
 /// How often the controller state is refreshed even when nothing changes.
 /// The reference client polls the pad every 16 ms and reports that often, so
 /// the server always has a recent state to work with.
-const GAMEPAD_REFRESH_INTERVAL: Duration = Duration::from_millis(16);
+/// How often the controller state is refreshed even when nothing changes.
+/// The reference client polls the pad every 8 ms (125 Hz) and reports it
+/// just as often, so the server is always acting on a state no more than
+/// 8 ms old. It was 16 ms here, which is why `in-rate` read ~50/s on the
+/// HUD: that was the refresh interval, not the wire.
+const GAMEPAD_REFRESH_INTERVAL: Duration = Duration::from_millis(8);
 const MAX_PENDING_COMMANDS: usize = 16;
 const MAX_PENDING_EVENTS: usize = 32;
 const MAX_PENDING_AUDIO_BATCHES: usize = 16;
@@ -347,10 +352,12 @@ async fn run_session<B: super::session::RtcSessionBackend>(
 
                 for (id, mut frame) in drained {
                     let now = Instant::now();
-                    METRICS.decode_to_handoff_max_us.fetch_max(
-                        now.duration_since(frame.decoded_at).as_micros() as u64,
-                        Relaxed,
-                    );
+                    // Decode to handoff: both the worst frame and the
+                    // standing average, so the HUD shows which.
+                    let decode_to_handoff_us = now.duration_since(frame.decoded_at).as_micros() as u64;
+                    METRICS.decode_to_handoff_max_us.fetch_max(decode_to_handoff_us, Relaxed);
+                    METRICS.decode_to_handoff_sum_us.fetch_add(decode_to_handoff_us, Relaxed);
+                    METRICS.decode_to_handoff_count.fetch_add(1, Relaxed);
                     frame.handed_off_at = Some(now);
                     latest.push_back((id, frame));
                     METRICS.handoffs.fetch_add(1, Relaxed);
@@ -424,11 +431,25 @@ fn send_sampled_gamepad_frame<B: super::session::RtcSessionBackend>(
         .input_lag_count
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+    // A sudden controller change is a moment the client knows the content
+    // of, so the first picture that could have been captured after it
+    // landing fixes the server's half of the round trip: the time from
+    // the change until that picture shows up is the input→photon delay,
+    // which no other number on the screen covers.
+    let changed = last_sent
+        .as_ref()
+        .is_some_and(|(previous, _)| *previous != sampled.frame);
+
     if session
         .backend
         .send_gamepad_frame(&mut session.peer, sampled.frame.clone())
     {
-        *last_sent = Some((sampled.frame, now));
+        *last_sent = Some((sampled.frame.clone(), now));
+    }
+
+    if changed {
+        let video_ts = session.last_video_timestamp().unwrap_or(0);
+        crate::streaming::video::metrics::arm_input_probe(now, video_ts);
     }
 }
 

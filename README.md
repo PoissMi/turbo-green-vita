@@ -209,6 +209,36 @@ timeline is running behind by (`srv`, `drift`).
   only ~30 ms old — and perceived latency is anchored on the sound. The
   jitter buffer is now 30 ms, the start buffer 25 ms and the device buffer
   10.7 ms, cutting total audio buffering from ~180 ms to ~66 ms.
+- **The client stopped destroying audio time (0.4.2).** The RTP jitter
+  buffer used to drop anything it could not assemble in time, and every
+  hole it left made the sound jump forward in game time — which the player
+  reads as the picture getting later and later. The deadline is now 40 ms
+  and the queue is capped instead of overflowing silently.
+- **Every decoded frame reaches the screen, freshest first (0.4.2).** The
+  UI slot used to take the *oldest* frame still within the freshness
+  limit, so a frame waited in the slot while a newer one was already
+  available: handoff-to-upload averaged 13.6 ms against a decode-to-handoff
+  of 3.7 ms. The slot now drops every superseded frame and hands the
+  display the freshest one the client has.
+- **The input report is the newest state, not a batch (0.4.2).** The input
+  queue used to batch 2–3 sampled controller states into one packet, and
+  the server reads the last one — so the input the server acted on was the
+  oldest state in the batch plus whatever was sampled in between. The queue
+  now holds exactly one frame, the freshest, and supersedes anything older.
+- **The controller is refreshed at the reference cadence (0.4.2).** The
+  send gate suppressed unchanged frames for 16 ms, so `in-rate` read ~50/s —
+  that was the refresh interval, not the wire. It is now 8 ms (125 Hz), the
+  cadence the reference client polls at.
+- **The render loop runs at 8 ms, not 15 ms (0.4.2).** At 15 ms the loop
+  slips against the server's capture clock by up to a frame in complex
+  scenes, and that slip is the drift that grows while playing. 8 ms bounds
+  the phase error to half a frame.
+- **No more keyframe probe (0.4.2).** A real keyframe request every 10
+  seconds cost a hitch on a 5 Mbps link, and the hitch was being read back as
+  the measurement. The picture's absolute age is now `srv + age`, both
+  already measured.
+- **No frame-rate setting (0.4.2).** The server ignores it. The fps is one
+  fixed constant, advertised in the SDP level and the capabilities message.
 
 ### Max bitrate setting
 

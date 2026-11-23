@@ -15,6 +15,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const KEYFRAME_REQUEST_COOLDOWN: Duration = Duration::from_millis(120);
+/// How often a fresh picture is asked for to measure how long the picture
+/// takes to come back. The request is a real one, so it costs a keyframe on
+/// the wire; the interval keeps that rare enough to not disturb the stream.
 const BANDWIDTH_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 const INITIAL_VIDEO_GRACE: Duration = Duration::from_millis(500);
 const INITIAL_VIDEO_KEYFRAME_INTERVAL: Duration = Duration::from_millis(500);
@@ -23,9 +26,28 @@ const INITIAL_VIDEO_KEYFRAME_INTERVAL: Duration = Duration::from_millis(500);
 const MIN_BANDWIDTH_ESTIMATE_KBPS: u32 = 1500;
 /// The server's video timeline slipping by more than this over a minute means
 /// a queue is growing in front of us.
-const DRIFT_BACKOFF_MS: i64 = 25;
+///
+/// It was 25 ms, so a picture getting 25 ms older in a minute was left
+/// alone while it accumulated. At 6 ms/min the user already feels it, so
+/// the threshold is 10: a queue that grows is grown by the rate the server
+/// is asked for, and that is the one thing this client controls.
+const DRIFT_BACKOFF_MS: i64 = 10;
 /// Below this the path is keeping up, so the estimate may climb again.
-const DRIFT_RECOVER_MS: i64 = 8;
+const DRIFT_RECOVER_MS: i64 = 5;
+/// The video falling this far behind the audio over a minute means the
+/// server's encoder is not keeping up with the rate we ask for.
+const AV_LAG_BACKOFF_MS: i64 = 10;
+/// Below this the video may be climbing back towards the audio.
+const AV_LAG_RECOVER_MS: i64 = 5;
+/// The frame rate we advertise to the server.
+///
+/// The server does not take this from what we ask: the upstream client
+/// asked for 30 fps and was sent 60, and this client asks for 60 and is
+/// sent 60. The number is still advertised - the capabilities message and
+/// the control channel's video preference both carry it, and the SDP's
+/// level has to match it - but it is not a choice any more, so it is not
+/// a setting.
+pub(crate) const REQUESTED_VIDEO_FPS: u32 = 60;
 
 pub(crate) struct RtcSessionConfig {
     pub stun_server: &'static str,
@@ -74,6 +96,12 @@ pub(crate) struct RtcSession<B: RtcSessionBackend> {
 }
 
 impl<B: RtcSessionBackend> RtcSession<B> {
+    /// The newest video timestamp that was received, so the input probe
+    /// knows which pictures can only have been captured after the input.
+    pub(crate) fn last_video_timestamp(&self) -> Option<u32> {
+        self.video.last_video_timestamp()
+    }
+
     pub async fn new(
         mut peer: RTCPeerConnection,
         backend: B,
@@ -169,7 +197,10 @@ impl<B: RtcSessionBackend> RtcSession<B> {
                 .server_video_size()
                 .map(|(width, height)| format!("srv:{width}x{height}"))
                 .unwrap_or_else(|| "srv:?".to_owned());
-            self.status = format!("cap:{}kbps {server} {status}", self.max_video_bitrate_kbps);
+            self.status = format!(
+                "cap:{}kbps fps:{} {server} {status}",
+                self.max_video_bitrate_kbps, REQUESTED_VIDEO_FPS
+            );
             eprintln!("{}", self.status);
         }
 
@@ -191,6 +222,8 @@ impl<B: RtcSessionBackend> RtcSession<B> {
     /// user's setting stays the ceiling: the estimate climbs back towards it
     /// whenever the path keeps up.
     fn next_bandwidth_estimate(&mut self) -> u32 {
+        // The user's setting is the ceiling. Nothing clamps it: the bitrate
+        // the server is asked for is exactly what was chosen.
         let ceiling = self
             .max_video_bitrate_kbps
             .max(MIN_BANDWIDTH_ESTIMATE_KBPS);
@@ -198,13 +231,32 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             .server_drift_us
             .load(std::sync::atomic::Ordering::Relaxed)
             / 1000;
+        // How much the video has fallen behind the audio over the last
+        // minute. The audio is mixed from the game clock and the video from
+        // the same clock, so the two drifting apart means the video is
+        // being delivered from an older point in the game - the encoder
+        // cannot keep up.
+        let av_drift_ms = crate::streaming::video::metrics::METRICS
+            .av_lag_drift_us
+            .load(std::sync::atomic::Ordering::Relaxed)
+            / 1000;
         let current = self
             .bandwidth_estimate_kbps
             .max(MIN_BANDWIDTH_ESTIMATE_KBPS);
-        let next = if drift_ms > DRIFT_BACKOFF_MS {
+        // The governor reacts to the picture falling *further* behind, not
+        // to it being behind in the first place.
+        //
+        // A server that is simply slow shows a constant delay, and a
+        // constant delay is not something a lower bitrate can fix - so
+        // reacting to it would only throw the picture away for nothing.
+        // What a lower bitrate can fix is a delay that keeps growing,
+        // because that is the encoder falling behind its own clock.
+        let struggling = drift_ms > DRIFT_BACKOFF_MS || av_drift_ms > AV_LAG_BACKOFF_MS;
+        let healthy = drift_ms < DRIFT_RECOVER_MS && av_drift_ms < AV_LAG_RECOVER_MS;
+        let next = if struggling {
             // The queue is growing: ask for noticeably less than we get.
             (current * 85 / 100).max(MIN_BANDWIDTH_ESTIMATE_KBPS)
-        } else if drift_ms < DRIFT_RECOVER_MS {
+        } else if healthy {
             // The path is keeping up: climb back towards the ceiling.
             current
                 .saturating_add(ceiling.saturating_sub(current) / 8)

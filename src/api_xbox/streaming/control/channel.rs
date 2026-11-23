@@ -36,6 +36,13 @@ pub(in crate::api_xbox::streaming) fn handle_data_channel_message(
     if let Some(mut control_channel) = pc.data_channel(ids.control) {
         let _ = control_channel.send_text(authorization_request().to_string());
         let _ = control_channel.send_text(gamepad_changed(0, true).to_string());
+        // The frame rate is asked for on the control channel as well as in
+        // the capabilities message: the server takes the rate from the
+        // capabilities `supportsFps` field only sometimes, and the video
+        // preference is the message that names the frame rate directly.
+        let _ = control_channel.send_text(
+            video_preference(video_width, video_height).to_string(),
+        );
     }
     if let Some(mut message_channel) = pc.data_channel(ids.message) {
         for message in startup_messages(max_bitrate_kbps, video_width, video_height) {
@@ -120,6 +127,24 @@ pub fn video_keyframe_requested(ifr_requested: bool) -> Value {
     })
 }
 
+/// The video preference the control channel accepts.
+///
+/// The capabilities message carries `supportsFps`, and the rate is named
+/// again here. Neither is a request the server acts on: a client that asks
+/// for 30 fps is still sent 60. The frame rate is one fixed number, so
+/// this exists to keep the messages complete rather than to ask for
+/// anything.
+pub fn video_preference(width: u32, height: u32) -> Value {
+    json!({
+        "type": "VideoPreference",
+        "width": width,
+        "height": height,
+        "fps": crate::api::streaming::rtc::session::REQUESTED_VIDEO_FPS,
+        "videoCodec": "H264",
+        "colorSpaceFlags": 0,
+    })
+}
+
 pub fn message_handshake() -> Value {
     json!({
         "type": "Handshake",
@@ -139,7 +164,11 @@ pub fn generate_message(path: &str, data: Value) -> Value {
     })
 }
 
-pub fn startup_messages(max_bitrate_kbps: u32, width: u32, height: u32) -> Vec<Value> {
+pub fn startup_messages(
+    max_bitrate_kbps: u32,
+    width: u32,
+    height: u32,
+) -> Vec<Value> {
     vec![
         generate_message(
             "/streaming/systemUi/configuration",
@@ -166,7 +195,7 @@ pub fn startup_messages(max_bitrate_kbps: u32, width: u32, height: u32) -> Vec<V
                 "supportsCustomResolution": true,
                 "supportsHevc": false,
                 "supportsHdr": false,
-                "supportsFps": 60,
+                "supportsFps": crate::api::streaming::rtc::session::REQUESTED_VIDEO_FPS,
                 "maxWidth": width,
                 "maxHeight": height,
                 "maxBitrateKbps": max_bitrate_kbps,
