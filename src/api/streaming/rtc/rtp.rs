@@ -638,7 +638,12 @@ impl VideoRtp {
         if let Some(probe) = crate::streaming::video::metrics::take_input_probe() {
             let newer_ms = completed.timestamp.wrapping_sub(probe.video_ts) as i64 * 1_000
                 / i64::from(VIDEO_RTP_CLOCK_RATE);
-            if (0..=PROBE_MAX_NEWER_MS).contains(&newer_ms) {
+            // The picture must also be newer than the round trip of the
+            // picture path itself. A picture captured sooner than that
+            // cannot have been caused by the input, and taking it would
+            // read as a few milliseconds when the real round trip is
+            // hundreds.
+            if newer_ms >= probe.min_newer_ms && newer_ms <= PROBE_MAX_NEWER_MS {
                 crate::streaming::video::metrics::record_input_probe(
                     probe.sampled_at,
                     Instant::now(),

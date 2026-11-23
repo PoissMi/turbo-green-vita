@@ -356,6 +356,13 @@ impl AudioRenderer {
     /// This used to delete decoded audio and left `a-del` and `holes` at
     /// their clamps while the speakers went silent: the player heard the
     /// trim cutting his own audio.
+    ///
+    /// Note what this cannot do. Both producers and consumers run in real
+    /// time, so a pipeline that fills to the ceiling stays at the ceiling;
+    /// nothing below can drain it, because the SDL device will not play
+    /// faster than the audio arrives. What keeps the standing delay down
+    /// is the queue cap below, not this trim. This trim only stops a
+    /// backlog from making the sound older than the picture by more.
     fn trim_to_target(&mut self) {
         use crate::streaming::video::metrics::{METRICS, client_audio_delay_samples};
         let ceiling = AUDIO_MAX_DELAY_MS * 48;

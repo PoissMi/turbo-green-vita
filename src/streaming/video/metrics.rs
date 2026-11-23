@@ -762,12 +762,28 @@ pub(crate) struct InputProbe {
     pub sampled_at: Instant,
     /// The newest video timestamp the client had seen at that moment.
     pub video_ts: u32,
+    /// The picture must be at least this much newer than `video_ts` to
+    /// count as caused by the input. Without it the answer is any frame:
+    /// a picture captured a frame after the change, before the server
+    /// could possibly have received the input, which reads as a 5 ms
+    /// round trip while the real one is 500.
+    pub min_newer_ms: i64,
 }
 
 /// Arms the input probe.
+///
+/// The causality floor is the round trip of the *picture* path, measured
+/// the only way the client can: from a keyframe request until the picture
+/// it brings back lands. Anything newer than that could genuinely have
+/// been caused by the input; anything older cannot.
 pub(crate) fn arm_input_probe(sampled_at: Instant, video_ts: u32) {
+    let min_newer_ms = (METRICS.probe_net_min_us.load(Ordering::Relaxed) / 1000) as i64;
     if let Ok(mut slot) = METRICS.input_probe_armed_at.lock() {
-        *slot = Some(InputProbe { sampled_at, video_ts });
+        *slot = Some(InputProbe {
+            sampled_at,
+            video_ts,
+            min_newer_ms,
+        });
     }
 }
 
