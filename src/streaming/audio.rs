@@ -67,10 +67,16 @@ const AUDIO_TRIM_ABOVE_MS: u64 = 260;
 /// How much audio to buffer before starting playback.
 ///
 /// This used to be 80 ms, which put the sound roughly a third of a second
-/// behind the picture (the video reaches the screen ~30 ms after it arrives).
-/// The brain anchors perceived latency on the sound, so this buffer was the
-/// largest remaining latency source in the client.
-const AUDIO_START_BUFFER_BYTES: u32 = AUDIO_BYTES_PER_SECOND * 25 / 1_000;
+/// behind the picture (the video reaches the screen ~30 ms after it
+/// arrives). The brain anchors perceived latency on the sound, so this
+/// buffer was the largest remaining latency source in the client.
+///
+/// It must stay well below `MAX_QUEUED_AUDIO_BYTES`. The 0.4.10 cut put
+/// both at 25 ms, so the queue could never exceed the start threshold,
+/// the `>=` test that resumes the device never passed, and the client
+/// was silent from the first frame: the cap and the threshold have to be
+/// different numbers, not the same one.
+const AUDIO_START_BUFFER_BYTES: u32 = AUDIO_BYTES_PER_SECOND * 15 / 1_000;
 const MAX_OPUS_FRAME_SAMPLES_PER_CHANNEL: usize = 5_760;
 const MAX_PENDING_OPUS_PACKETS: usize = 32;
 const MAX_PENDING_PCM_BUFFERS: usize = 8;
