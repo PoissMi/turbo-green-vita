@@ -27,14 +27,19 @@ const INITIAL_VIDEO_KEYFRAME_INTERVAL: Duration = Duration::from_millis(500);
 const MIN_BANDWIDTH_ESTIMATE_KBPS: u32 = 1500;
 /// The server's video timeline slipping by more than this over a minute means
 /// a queue is growing in front of us.
-const DRIFT_BACKOFF_MS: i64 = 25;
+///
+/// It was 25 ms, so a picture getting 25 ms older in a minute was left
+/// alone while it accumulated. At 6 ms/min the user already feels it, so
+/// the threshold is 10: a queue that grows is grown by the rate the server
+/// is asked for, and that is the one thing this client controls.
+const DRIFT_BACKOFF_MS: i64 = 10;
 /// Below this the path is keeping up, so the estimate may climb again.
-const DRIFT_RECOVER_MS: i64 = 8;
+const DRIFT_RECOVER_MS: i64 = 5;
 /// The video falling this far behind the audio over a minute means the
 /// server's encoder is not keeping up with the rate we ask for.
-const AV_LAG_BACKOFF_MS: i64 = 25;
+const AV_LAG_BACKOFF_MS: i64 = 10;
 /// Below this the video may be climbing back towards the audio.
-const AV_LAG_RECOVER_MS: i64 = 8;
+const AV_LAG_RECOVER_MS: i64 = 5;
 /// The frame rate we advertise to the server.
 ///
 /// The server does not take this from what we ask: the upstream client

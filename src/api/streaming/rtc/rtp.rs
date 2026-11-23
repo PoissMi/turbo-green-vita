@@ -20,21 +20,12 @@ const AUDIO_MAX_LATE_PACKETS: u16 = 32;
 /// How long the jitter buffer waits for a late audio packet before it gives
 /// up on it.
 ///
-/// The buffer only holds audio that has arrived but cannot be played yet,
-/// so a longer deadline costs a little latency in the bad case and saves
-/// the audio - and with it the A/V sync - in the case where a packet is
-/// merely late.
-///
-/// It was 120 ms, and with the device queue on top of it the client held
-/// 230 ms of sound before a single sample reached the speaker - ten times
-/// the age of the picture it was playing against. The picture arrives 17 ms
-/// old; the sound arrived 309 ms old; the player heard the sound of an
-/// action a fifth of a second after they saw it.
-///
-/// 40 ms is still generous: the video path measures sub-millisecond packet
-/// reordering on this link, so the audio needs room for a packet to be late,
-/// not for a packet to be missing.
-const AUDIO_JITTER_DEADLINE_MS: u64 = 40;
+/// It was 40 ms, and 40 ms of the client's 282 ms of standing sound came
+/// from here. 20 ms is still more than one 20 ms Opus frame late, which
+/// is the only lateness that can be repaired: a packet that has not
+/// arrived inside its own frame's window is lost, not late, and waiting
+/// for it only makes the sound older.
+const AUDIO_JITTER_DEADLINE_MS: u64 = 20;
 const LOW_FPS_DAMAGE_LIMIT: u8 = 8;
 const HIGH_FPS_DAMAGE_LIMIT: u8 = 3;
 /// Frames kept in the reassembly queue while the head frame waits for its
