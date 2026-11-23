@@ -20,12 +20,13 @@ const AUDIO_MAX_LATE_PACKETS: u16 = 32;
 /// How long the jitter buffer waits for a late audio packet before it gives
 /// up on it.
 ///
-/// It was 40 ms, and 40 ms of the client's 282 ms of standing sound came
-/// from here. 20 ms is still more than one 20 ms Opus frame late, which
-/// is the only lateness that can be repaired: a packet that has not
-/// arrived inside its own frame's window is lost, not late, and waiting
-/// for it only makes the sound older.
-const AUDIO_JITTER_DEADLINE_MS: u64 = 20;
+/// It was 20 ms in 0.4.10, which is exactly one 20 ms Opus frame, and the
+/// sound was terrible: a packet one frame late is *dropped* instead of
+/// held, so every late packet became a hole, and the player heard holes.
+/// 40 ms is two frames of slack, which is what a late packet actually
+/// needs; the standing delay comes from the device queue and the decoded
+/// pipeline, not from this.
+const AUDIO_JITTER_DEADLINE_MS: u64 = 40;
 const LOW_FPS_DAMAGE_LIMIT: u8 = 8;
 const HIGH_FPS_DAMAGE_LIMIT: u8 = 3;
 /// Frames kept in the reassembly queue while the head frame waits for its

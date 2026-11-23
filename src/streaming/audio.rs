@@ -17,15 +17,14 @@ const AUDIO_BYTES_PER_SECOND: u32 = AUDIO_SAMPLE_RATE as u32 * AUDIO_CHANNELS as
 /// It was 50 ms, and the client still held 282 ms of sound between the
 /// socket and the speaker: the jitter buffer and the decoded pipeline
 /// sit in front of a queue this shallow, so the queue was not the
-/// backlog. This cut alone is not the whole fix, but it is the term the
-/// client can actually see and bound, and a device queue that stays near
-/// empty is the difference between the sound being 282 ms old and being
-/// 200 ms old.
-///
-/// It cannot go below ~25 ms: the shell hands audio to the device every
-/// 15 ms and the decoder hands it over in 20 ms frames, so a queue
-/// shallower than one pump interval makes the sound stumble.
-const MAX_QUEUED_AUDIO_BYTES: u32 = AUDIO_BYTES_PER_SECOND * 25 / 1_000;
+/// 50 ms. It was 25 ms in 0.4.10-0.4.11 and the sound was terrible: the
+/// shell hands audio to the device every 15 ms and the decoder hands it
+/// over in 20 ms frames, so a queue at 25 ms is one pump interval deep
+/// and the device starves in between. The standing backlog the user
+/// measured was 282 ms, and almost none of it was here - it was in the
+/// jitter buffer and the decoded pipeline. The queue is not where the
+/// delay lives.
+const MAX_QUEUED_AUDIO_BYTES: u32 = AUDIO_BYTES_PER_SECOND * 50 / 1_000;
 /// The delay the client is willing to carry, used as a ceiling.
 ///
 /// The client's own audio delay - everything from the socket to the
