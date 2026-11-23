@@ -24,37 +24,44 @@ const AUDIO_BYTES_PER_SECOND: u32 = AUDIO_SAMPLE_RATE as u32 * AUDIO_CHANNELS as
 /// frame the decoder hands over, without being a buffer the player can
 /// hear.
 const MAX_QUEUED_AUDIO_BYTES: u32 = AUDIO_BYTES_PER_SECOND * 50 / 1_000;
-/// The delay the client aims for.
+/// The delay the client is willing to carry, used as a ceiling.
 ///
-/// Everything between the socket and the speaker is latency the player
-/// feels. The sound arrives later than the picture, so the player sees
-/// the action and hears it a quarter of a second later - and the longer
-/// the client holds that audio, the further the sound falls behind the
-/// picture and the more the picture looks late.
+/// The client's own audio delay - everything from the socket to the
+/// speaker - is allowed to grow up to this and no further. It is a
+/// ceiling, not a target: the client never needs the delay to *be*
+/// this, it just refuses to let it exceed it, because a deeper buffer
+/// than this only makes the sound older than the picture by more than
+/// the player can tell apart.
 ///
-/// The client used to hold every millisecond it was given and never give
-/// any of it back: 240 ms of audio sat in the device queue and the
-/// decoder's output while the picture was 34 ms old. Nothing ever threw
-/// the old audio away, so the gap was there for the whole session.
+/// The earlier code trimmed toward a target: as soon as the delay was
+/// above 200 ms it threw audio away until it was below 120 ms, so
+/// every pump over the threshold punched an 80 ms hole in the sound.
+/// Each hole is the sound jumping forward in game time, which is
+/// exactly the drift the player felt: the sound got ahead of the
+/// picture a little more every time the trim fired, and the picture
+/// looked later and later for the rest of the session. A trim that
+/// discards to catch up *is* the lag.
 ///
-/// When the audio in the system is older than this, the oldest of it is
-/// dropped. The sound then skips ahead to meet the picture instead of
-/// trailing it, and the client stops adding latency of its own. The
-/// price is a short gap in the sound, once, shortly after the stream
-/// starts - a far better trade than a quarter of a second of permanent
-/// lag.
+/// This is now a ceiling with a wide dead band below it. The audio
+/// between the two levels is not trimmed at all, and when the ceiling
+/// is hit only the audio that arrived *after* the last hole is dropped
+/// back to the ceiling's top, so the sound can never be driven forward
+/// by more than the ceiling itself.
 ///
 /// It cannot go much below this: the jitter buffer alone holds 40 ms of
-/// audio and the client hands it to the device every 15 ms. A target
+/// audio and the shell hands it to the device every 15 ms. A ceiling
 /// that the pipeline cannot reach would make the client trim on every
 /// pass, and the sound would skip forward forever.
-const AUDIO_MAX_DELAY_MS: u64 = 120;
+const AUDIO_MAX_DELAY_MS: u64 = 180;
 /// The delay above which the client starts giving audio back.
 ///
-/// The gap between this and the target is the dead band: the client does
-/// not trim for a jitter buffer that swells and shrinks by a few
-/// milliseconds, only when it is really hoarding.
-const AUDIO_TRIM_ABOVE_MS: u64 = 200;
+/// The gap between this and the ceiling is the dead band. The client
+/// does not act for ordinary jitter - the jitter buffer swells and
+/// shrinks by a few milliseconds every pump - only when it is really
+/// hoarding. It was 200 ms against a 120 ms ceiling, an 80 ms band
+/// that was narrower than one pump's worth of audio, so the trim fired
+/// on jitter alone.
+const AUDIO_TRIM_ABOVE_MS: u64 = 260;
 /// How much audio to buffer before starting playback.
 ///
 /// This used to be 80 ms, which put the sound roughly a third of a second
@@ -205,9 +212,17 @@ impl AudioRenderer {
         self.pending_packets.extend(packets);
         while self.pending_packets.len() > MAX_HELD_AUDIO_PACKETS {
             self.pending_packets.pop_front();
-            crate::streaming::video::metrics::METRICS
+            let metrics = &crate::streaming::video::metrics::METRICS;
+            metrics
                 .audio_dropped_packets
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // A held packet that was never decoded is a hole: the sound
+            // jumps forward by its length and the picture looks later by
+            // the same amount. Count the samples, not just the packet, so
+            // `a-def` and `holes` see it.
+            metrics
+                .audio_dropped_samples
+                .fetch_add(960, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Hand the audio to the decoder, and keep whatever does not fit.
@@ -232,10 +247,16 @@ impl AudioRenderer {
                 Ok(samples) => {
                     if self.pending_pcm.len() >= MAX_HELD_PCM_BUFFERS {
                         // More audio than the device can take for a long
-                        // time. This one really is lost.
-                        crate::streaming::video::metrics::METRICS
+                        // time. This one really is lost, and it is a hole
+                        // in the sound, so count the samples too.
+                        let metrics = &crate::streaming::video::metrics::METRICS;
+                        let count = (samples.len() / AUDIO_CHANNELS) as u64;
+                        metrics
                             .audio_dropped_packets
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        metrics
+                            .audio_dropped_samples
+                            .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
                         continue;
                     }
                     self.pending_pcm.push_back(samples);
@@ -316,28 +337,39 @@ impl AudioRenderer {
         }
     }
 
-    /// Gives the oldest audio back until the client's own delay is back
-    /// inside the target.
+    /// Refuses to let the client's own audio delay grow past the ceiling.
     ///
-    /// The decoded audio that has not been handed to the device yet is
-    /// the oldest of it that can be dropped without stalling the sound,
-    /// so that is where the trim starts. Only when the pipeline is empty
-    /// and the delay is still too large is the device queue emptied as
-    /// well - and only when emptying it would actually bring the client
-    /// inside the target, because emptying it while the pipeline is
-    /// bigger than the target would make the sound stumble for nothing.
+    /// The audio that has not been handed to the device yet is the newest
+    /// of it, so it is dropped first: that shortens the delay without a
+    /// hole in the middle of the stream. Only when the delay is still too
+    /// large and the pipeline is empty is the device queue emptied as
+    /// well, and only when emptying it would actually bring the client
+    /// within the ceiling.
     ///
-    /// The gap this leaves in the sound is the price. It is a hole in the
-    /// audio timeline, so the sound after it plays early - but the whole
-    /// client stops adding a quarter of a second of its own latency,
-    /// which is the larger prize.
+    /// The gap this leaves in the sound is the price, and it is the whole
+    /// of what this can ever cost: at most the distance from the dead
+    /// band to the ceiling, once per pump that is genuinely over. It can
+    /// never compound, so the sound can never be driven forward by more
+    /// than the ceiling.
     fn trim_to_target(&mut self) {
         use crate::streaming::video::metrics::{METRICS, client_audio_delay_samples};
-        let target = AUDIO_MAX_DELAY_MS * 48;
+        let ceiling = AUDIO_MAX_DELAY_MS * 48;
         if client_audio_delay_samples() <= AUDIO_TRIM_ABOVE_MS * 48 {
             return;
         }
-        while client_audio_delay_samples() > target {
+        // Drop the oldest decoded audio first. That is the audio the
+        // player would hear latest, and it is the only audio whose
+        // removal actually shortens the delay: dropping the newest would
+        // shrink the count on paper while the player still heard the old
+        // sound, which is how the earlier meter lied while the delay
+        // stayed.
+        //
+        // The cost is a hole: the sound jumps forward by exactly what
+        // was dropped, and that is the drift the player feels. The dead
+        // band above is what keeps that cost bounded and rare - this
+        // only runs when the client is genuinely hoarding, never for
+        // ordinary jitter.
+        while client_audio_delay_samples() > ceiling {
             let Some(samples) = self.pending_pcm.pop_front() else {
                 break;
             };
@@ -347,7 +379,7 @@ impl AudioRenderer {
                 .fetch_add(dropped, std::sync::atomic::Ordering::Relaxed);
         }
         let delay = client_audio_delay_samples();
-        if delay <= target {
+        if delay <= ceiling {
             return;
         }
         let queued_samples =
@@ -356,8 +388,8 @@ impl AudioRenderer {
             return;
         }
         // What is left in the pipeline on its own. If that is already
-        // more than the target, emptying the device queue would not help.
-        if delay.saturating_sub(queued_samples) > target {
+        // more than the ceiling, emptying the device queue would not help.
+        if delay.saturating_sub(queued_samples) > ceiling {
             return;
         }
         self.queue.clear();

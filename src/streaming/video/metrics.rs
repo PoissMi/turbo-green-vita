@@ -201,6 +201,8 @@ pub(crate) struct VideoMetrics {
     /// Audio that had to be thrown away because the pipeline could not hold
     /// it. Should stay at zero.
     pub(crate) audio_dropped_packets: AtomicU64,
+    /// The samples those dropped packets carried.
+    pub(crate) audio_dropped_samples: AtomicU64,
     /// Audio the client threw away because it was older than the delay the
     /// client is willing to carry.
     ///
@@ -212,6 +214,11 @@ pub(crate) struct VideoMetrics {
     /// Audio that was in the device queue when the client trimmed the
     /// delay. It never reached the speaker.
     pub(crate) audio_cleared_samples: AtomicU64,
+    /// How much of the client's total audio time is in holes, in
+    /// milliseconds. Every hole is the sound jumping forward in game
+    /// time; the sum is the drift the player feels as the picture
+    /// getting later and later.
+    pub(crate) audio_holes_ms: AtomicI64,
 }
 
 /// The latest tick of each stream, and the history used to measure how far
@@ -419,16 +426,23 @@ fn update_audio_lost() {
     if sent == 0 {
         return;
     }
-    // The audio the client trimmed away never reached the speaker either.
+    // The audio the client trimmed away never reached the speaker either,
+    // and neither did the audio the jitter buffer dropped after its
+    // deadline. Both are holes.
     let trimmed = METRICS.audio_trimmed_samples.load(Ordering::Relaxed);
     let cleared = METRICS.audio_cleared_samples.load(Ordering::Relaxed);
+    let dropped = METRICS.audio_dropped_samples.load(Ordering::Relaxed);
     let lost = sent
         .saturating_sub(decoded)
         .saturating_sub(jitter)
         .saturating_add(trimmed)
-        .saturating_add(cleared);
+        .saturating_add(cleared)
+        .saturating_add(dropped);
     METRICS
         .audio_lost_ms
+        .store(((lost * 1_000) / 48_000) as i64, Ordering::Relaxed);
+    METRICS
+        .audio_holes_ms
         .store(((lost * 1_000) / 48_000) as i64, Ordering::Relaxed);
 }
 
@@ -459,19 +473,22 @@ fn audio_tick_at(sync: &AvSync, at: Instant) -> Option<f64> {
 /// client: the picture reaches the screen 34 ms after it arrives, the
 /// sound reaches the speaker 357 ms after it arrives.
 pub(crate) fn client_audio_delay_samples() -> u64 {
-    let sent = METRICS.audio_sent_samples.load(Ordering::Relaxed);
-    let decoded = METRICS.audio_decoded_samples.load(Ordering::Relaxed);
-    let played = METRICS.audio_played_samples.load(Ordering::Relaxed);
+    // Every stage counted exactly once: the jitter buffer (everything
+    // the server has sent that the decoder has not yet taken), the
+    // decoded pipeline (what the decoder has taken and the device has
+    // not), and the device queue (what the device has not played yet).
+    //
+    // The earlier formula added the device queue to
+    // `sent - played - lost - trimmed`, which counts the queue twice:
+    // `played` only increments when audio is *handed to* the device, so
+    // everything sitting in that queue is inside both terms. That pushed
+    // `a-del` up by the full queue depth and made `ad` - the change in
+    // a number the trim itself drives down - a clamp-bound nonsense
+    // reading instead of a measurement.
     let jitter = METRICS.audio_jitter_samples.load(Ordering::Relaxed);
+    let pipeline = METRICS.audio_pipeline_samples.load(Ordering::Relaxed);
     let queued = METRICS.audio_queued_samples.load(Ordering::Relaxed);
-    let trimmed = METRICS.audio_trimmed_samples.load(Ordering::Relaxed);
-    // Audio the server sent that never reached the decoder is a hole in
-    // the sound, not a delay: it is not waiting anywhere, it is gone.
-    let lost = sent.saturating_sub(decoded).saturating_sub(jitter);
-    sent.saturating_sub(played)
-        .saturating_sub(lost)
-        .saturating_sub(trimmed)
-        .saturating_add(queued)
+    jitter.saturating_add(pipeline).saturating_add(queued)
 }
 
 /// The audio as it is heard against the video as it is seen.
@@ -818,8 +835,10 @@ pub(crate) static METRICS: VideoMetrics = VideoMetrics {
     audio_jitter_samples: AtomicU64::new(0),
     audio_lost_ms: AtomicI64::new(0),
     audio_dropped_packets: AtomicU64::new(0),
+    audio_dropped_samples: AtomicU64::new(0),
     audio_trimmed_samples: AtomicU64::new(0),
     audio_cleared_samples: AtomicU64::new(0),
+    audio_holes_ms: AtomicI64::new(0),
 };
 
 pub fn video_performance_summary() -> String {
@@ -847,7 +866,7 @@ pub fn video_performance_summary() -> String {
         .swap(0, Ordering::Relaxed)
         .checked_div(METRICS.audio_buffer_count.swap(0, Ordering::Relaxed))
         .unwrap_or(0);
-    let server_offset_ms = (METRICS.server_offset_us.load(Ordering::Relaxed) / 1000).clamp(-9_999, 9_999);
+    let server_offset_ms = (METRICS.server_offset_us.load(Ordering::Relaxed) / 1000).clamp(-999, 999);
     let server_drift_ms = (METRICS.server_drift_us.load(Ordering::Relaxed) / 1000).clamp(-999, 999);
     // The receive batch is not on the HUD any more, but the counters are
     // still reset so that they keep counting per interval.
@@ -872,32 +891,47 @@ pub fn video_performance_summary() -> String {
     // as it is heard. Positive means the picture looks late.
     let av_out_ms = (METRICS.av_playout_us.load(Ordering::Relaxed) / 1000).clamp(-999, 999);
     // The delay this client adds to the sound: every stage between the
-    // socket and the speaker - the jitter buffer, the decoded audio waiting
-    // for the device, and the device queue. This is the client's own share
-    // of the audio's latency, and the picture's age next to it is the
-    // client's share of the video's.
+    // socket and the speaker - the jitter buffer, the decoded audio
+    // waiting for the device, and the device queue. This is the client's
+    // own share of the audio's latency, and the picture's age next to it
+    // is the client's share of the video's. Nothing is counted twice any
+    // more: the device queue used to appear in both the counters and the
+    // queue depth, which inflated the number and made `ad` the trim's
+    // own shadow.
     let audio_delay_ms = (client_audio_delay_samples() * 1_000 / 48_000) as i64;
     let audio_delay_ms = audio_delay_ms.clamp(0, 999);
-    // How much that delay changed over the last minute. Negative means the
-    // sound is catching up with the picture, which is what makes the
-    // picture look later and later the longer the session runs.
-    let audio_delay_drift_ms = (METRICS.audio_delay_drift_us.load(Ordering::Relaxed) / 1000).clamp(-999, 999);
+    // How much that delay changed over the last minute. Negative means
+    // the sound is catching up with the picture, which is what makes the
+    // picture look later and later the longer the session runs. This can
+    // only move what the hoard holds; it is no longer the change in a
+    // number that the trim drives down.
+    let _audio_delay_drift_ms = (METRICS.audio_delay_drift_us.load(Ordering::Relaxed) / 1000).clamp(-999, 999);
     // The server's audio pipeline against our wall clock, the same number
     // the video's `srv` is. Between them they say which side the picture
     // is drifting against.
-    let audio_offset_ms = (METRICS.audio_offset_us.load(Ordering::Relaxed) / 1000).clamp(-9_999, 9_999);
+    let audio_offset_ms = (METRICS.audio_offset_us.load(Ordering::Relaxed) / 1000).clamp(-999, 999);
     // How long the fresh picture took to come back when it was asked for.
     // This is the picture's absolute age, the one delay that happens
-    // before the client can see anything at all.
+    // before the client can see anything at all. BOTH the latest reading
+    // and the best-of-session are shown, because the minimum is the clean
+    // path and the latest is the truth right now: if the picture is
+    // getting older, the latest reading rises while the minimum stays
+    // put, which is the signature of a growing delay that the minimum
+    // alone cannot show.
     let probe_count = METRICS.probe_count.load(Ordering::Relaxed);
     let probe_min_us = METRICS.probe_net_min_us.load(Ordering::Relaxed);
+    let probe_last_us = METRICS.probe_net_last_us.load(Ordering::Relaxed);
     let probe_ms = if probe_count == 0 {
         // No usable answer yet: the server did not send a picture that was
         // captured after the request.
-        "?".to_owned()
+        "?/?".to_owned()
     } else {
-        format!("{}", (probe_min_us / 1000).min(999))
+        format!("{}/{}", (probe_last_us / 1000).min(999), (probe_min_us / 1000).min(999))
     };
+    // The holes in the sound, in milliseconds. Each one is the sound
+    // jumping forward in game time, which is the whole of the drift the
+    // player feels.
+    let holes_ms = METRICS.audio_holes_ms.load(Ordering::Relaxed).clamp(-999, 999);
     // The longest the client held a damaged frame waiting for its missing
     // packets, and the number of times the picture lost ground with the
     // sound in one step.
@@ -908,9 +942,9 @@ pub fn video_performance_summary() -> String {
     let probe_ok = METRICS.probe_count.load(Ordering::Relaxed);
     let probe_no = METRICS.probe_rejected.load(Ordering::Relaxed);
     let _ = (probe_ok, probe_no, repair_wait_ms);
-    let audio_lost_ms = METRICS.audio_lost_ms.load(Ordering::Relaxed).clamp(-99, 99);
+    let audio_lost_ms = METRICS.audio_lost_ms.load(Ordering::Relaxed).clamp(-999, 999);
     format!(
-        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{} rmb:{} stut:{av_stalls} a-def:{audio_lost_ms}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us a-srv:{audio_offset_ms}ms\nsrv:{server_offset_ms}ms drift:{server_drift_ms}ms av-lag:{av_lag_ms}ms ld:{av_lag_drift_ms}ms av-out:{av_out_ms}ms a-del:{audio_delay_ms}ms ad:{audio_delay_drift_ms}ms kp:{probe_ms}ms",
+        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{} rmb:{} stut:{av_stalls} a-def:{audio_lost_ms}\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us a-srv:{audio_offset_ms}ms\nsrv:{server_offset_ms}ms drift:{server_drift_ms}ms av-lag:{av_lag_ms}ms ld:{av_lag_drift_ms}ms av-d:{av_out_ms}ms a-del:{audio_delay_ms}ms holes:{holes_ms}ms kp:{probe_ms}ms",
         METRICS.decoded.swap(0, Ordering::Relaxed),
         METRICS.presented.swap(0, Ordering::Relaxed),
         METRICS.decode_us.load(Ordering::Relaxed),

@@ -523,6 +523,11 @@ impl VideoRtp {
     /// capture time, so the gap between it and our arrival clock is exactly
     /// that hidden delay. Only its *change* over time matters; the absolute
     /// value carries the network delay.
+    ///
+    /// The origin is the FIRST frame of the session, and the offset is always
+    /// taken against it, so the server's clock and our clock are never
+    /// re-anchored. That is what makes `srv` a real measurement of a growing
+    /// queue rather than a number that resets itself every second.
     fn record_timeline(&mut self, rtp_timestamp: u32, arrived_at: Instant) {
         let Some((origin_ts, origin_wall)) = self.timeline_origin else {
             self.timeline_origin = Some((rtp_timestamp, arrived_at));
@@ -530,9 +535,15 @@ impl VideoRtp {
         };
         let offset_us =
             Self::timeline_offset_us(origin_ts, origin_wall, rtp_timestamp, arrived_at);
-        crate::streaming::video::metrics::METRICS
-            .server_offset_us
-            .store(offset_us, Ordering::Relaxed);
+        // Never store a zero: a zero offset is not a measurement, it is the
+        // absence of one, and storing it erases the real reading every time
+        // a frame happens to land on the origin. The HUD would then read a
+        // healthy number while the picture is half a second late.
+        if offset_us != 0 {
+            crate::streaming::video::metrics::METRICS
+                .server_offset_us
+                .store(offset_us, Ordering::Relaxed);
+        }
 
         // One sample per second is enough to see a queue that grows over
         // minutes, and it keeps the comparison below free of packet jitter.
@@ -548,7 +559,8 @@ impl VideoRtp {
             self.timeline_samples.pop_front();
         }
         // Compare against the sample from about a minute ago: a positive
-        // drift means the video is arriving later and later.
+        // drift means the video is arriving later and later. This is the
+        // number that grows while the user plays, which is the report.
         if let Some((at, ts)) = self
             .timeline_samples
             .iter()
