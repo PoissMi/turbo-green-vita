@@ -649,31 +649,6 @@ impl VideoRtp {
         }
 
         let unit = inspect_h264_access_unit(&data);
-        if unit.has_idr {
-            // The picture we asked for has landed: how long did it take?
-            //
-            // The frame age on the HUD starts when a packet leaves the
-            // socket buffer, so it cannot see the delay that is already in
-            // front of the client. This probe can: the moment the request
-            // went out is a moment whose content the client knows.
-            //
-            // A picture the server was going to send anyway says nothing
-            // about how long a request takes, so it only counts when it was
-            // captured after the request went out.
-            if let Some(probe) = crate::streaming::video::metrics::take_keyframe_probe() {
-                let newer_ms = completed.timestamp.wrapping_sub(probe.video_ts) as i64 * 1_000
-                    / i64::from(VIDEO_RTP_CLOCK_RATE);
-                if (0..=PROBE_MAX_NEWER_MS).contains(&newer_ms) {
-                    crate::streaming::video::metrics::record_keyframe_probe(
-                        probe.sent_at,
-                        Instant::now(),
-                        completed.first_packet_at.elapsed(),
-                    );
-                } else {
-                    crate::streaming::video::metrics::note_rejected_probe();
-                }
-            }
-        }
         stats.encoded_resolution = unit.resolution;
         let sample_too_large = unit
             .resolution

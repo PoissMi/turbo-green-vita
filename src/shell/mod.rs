@@ -28,7 +28,12 @@ const DIRECTION_REPEAT_INITIAL_DELAY: Duration = Duration::from_millis(350);
 const DIRECTION_REPEAT_INTERVAL: Duration = Duration::from_millis(90);
 const STREAM_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(4);
 
-pub(crate) const TARGET_FRAME_TIME: Duration = Duration::from_millis(15);
+/// The render loop deadline. Was 15 ms; at that cadence the loop slips
+/// against the server's capture clock by up to a frame in complex scenes
+/// (`d/a` 6328/6508 us against a 15 ms budget), and that slip is the
+/// drift the player feels growing. 8 ms bounds the phase error to half
+/// a frame.
+pub(crate) const TARGET_FRAME_TIME: Duration = Duration::from_millis(8);
 /// While streaming with no overlay visible, egui is rebuilt at this rate
 /// instead of every loop iteration. The video itself still presents every
 /// iteration; only the CPU-side `run`/`tessellate`/`paint` work is throttled.

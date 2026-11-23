@@ -18,7 +18,6 @@ const KEYFRAME_REQUEST_COOLDOWN: Duration = Duration::from_millis(120);
 /// How often a fresh picture is asked for to measure how long the picture
 /// takes to come back. The request is a real one, so it costs a keyframe on
 /// the wire; the interval keeps that rare enough to not disturb the stream.
-const KEYFRAME_PROBE_INTERVAL: Duration = Duration::from_secs(10);
 const BANDWIDTH_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 const INITIAL_VIDEO_GRACE: Duration = Duration::from_millis(500);
 const INITIAL_VIDEO_KEYFRAME_INTERVAL: Duration = Duration::from_millis(500);
@@ -91,8 +90,6 @@ pub(crate) struct RtcSession<B: RtcSessionBackend> {
     bandwidth_estimate_kbps: u32,
     last_bandwidth_report: Option<Instant>,
     last_keyframe_request: Option<Instant>,
-    /// When the last keyframe probe was fired, so the next one is spaced out.
-    last_keyframe_probe: Option<Instant>,
     initial_video_watchdog_started_at: Option<Instant>,
     last_initial_video_keyframe_request: Option<Instant>,
     pub status: String,
@@ -126,7 +123,6 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             bandwidth_estimate_kbps: config.max_video_bitrate_kbps,
             last_bandwidth_report: None,
             last_keyframe_request: None,
-            last_keyframe_probe: None,
             initial_video_watchdog_started_at: None,
             last_initial_video_keyframe_request: None,
             status: "Negotiating WebRTC connection".to_owned(),
@@ -183,13 +179,6 @@ impl<B: RtcSessionBackend> RtcSession<B> {
         }
         if self.initial_video_keyframe_due(now) {
             eprintln!("No initial video RTP after WebRTC connected; requesting a keyframe");
-            keyframe_requested = true;
-        }
-        // Ask for a fresh picture every so often: the round trip is the
-        // only way to see how old the picture is when it lands, because the
-        // frame age the HUD reports starts when the packet leaves the
-        // socket buffer.
-        if self.keyframe_probe_due(now) {
             keyframe_requested = true;
         }
         self.request_keyframe(keyframe_requested, now);
@@ -312,26 +301,6 @@ impl<B: RtcSessionBackend> RtcSession<B> {
         true
     }
 
-    /// Whether a fresh picture should be asked for to measure the round trip.
-    ///
-    /// The request is a real one, so it costs a keyframe on the wire and
-    /// the stream stutters a little when it lands. Every ten seconds is
-    /// rare enough for that to be tolerable and often enough to give the
-    /// number a few samples to settle on.
-    fn keyframe_probe_due(&mut self, now: Instant) -> bool {
-        if self.connection_state != RTCPeerConnectionState::Connected {
-            return false;
-        }
-        if self
-            .last_keyframe_probe
-            .is_some_and(|last| now.duration_since(last) < KEYFRAME_PROBE_INTERVAL)
-        {
-            return false;
-        }
-        self.last_keyframe_probe = Some(now);
-        true
-    }
-
     fn handle_peer_events(&mut self) -> Vec<RTCIceCandidateInit> {
         let mut gathered_candidates = Vec::new();
         while let Some(event) = self.peer.poll_event() {
@@ -415,9 +384,5 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.backend.notify_keyframe_requested(&mut self.peer);
         self.video.request_keyframe(&mut self.peer);
-        // From now on the fresh picture this request brings back measures
-        // how long a new picture takes to come back.
-        let video_ts = self.video.last_video_timestamp().unwrap_or(0);
-        crate::streaming::video::metrics::arm_keyframe_probe(now, video_ts);
     }
 }

@@ -166,28 +166,10 @@ pub(crate) struct VideoMetrics {
     /// next to it; this one is the value in force at the moment the HUD is
     /// drawn.
     pub(crate) frame_age_last_us: AtomicU64,
-    /// When a keyframe request went out, waiting for the fresh picture it
-    /// should bring back. The round trip is the picture's absolute age.
-    pub(crate) probe_armed_at: Mutex<Option<KeyframeProbe>>,
-    /// How long the last keyframe probe took: from the request until the
-    /// fresh picture was completely in hand. This is how old the picture is
-    /// when it lands, in milliseconds - the one number the client cannot
-    /// get any other way, because the frame age starts when the packet
-    /// leaves the socket buffer.
-    pub(crate) probe_last_us: AtomicU64,
-    /// The fastest keyframe probe of the session. The server may answer
-    /// late sometimes; the fastest answer is the cleanest estimate of how
-    /// long the picture takes to come back.
-    pub(crate) probe_min_us: AtomicU64,
-    /// The same probe with the keyframe's own time on the wire taken out:
-    /// this is how long the picture took to come back.
-    pub(crate) probe_net_last_us: AtomicU64,
-    pub(crate) probe_net_min_us: AtomicU64,
-    /// Keyframe probes that produced a measurement.
-    pub(crate) probe_count: AtomicU64,
-    /// Keyframe probes thrown away because the picture was not captured
-    /// after the request.
-    pub(crate) probe_rejected: AtomicU64,
+    /// The keyframe probe used to measure the picture's round trip by
+    /// asking for a keyframe every 10 seconds. It cost a hitch every time
+    /// (a keyframe on a 5 Mbps link), so it is gone; the picture's age is
+    /// now the server offset plus the display age, both already measured.
     /// The longest the client held a damaged frame waiting for its missing
     /// packets. This is the freeze the player sees when a packet is lost:
     /// the frames behind it cannot be decoded before it.
@@ -691,62 +673,6 @@ pub(crate) fn mark_input_queued(at: Instant) {    if let Ok(mut slot) = METRICS.
     }
 }
 
-/// A keyframe request waiting for its answer.
-pub(crate) struct KeyframeProbe {
-    /// When the request went out.
-    pub sent_at: Instant,
-    /// The newest video timestamp the client had seen when it went out.
-    /// The server's capture point is at that timestamp, so a picture that
-    /// comes back with a much newer timestamp was captured *after* the
-    /// request - only that one says anything about how long a request takes.
-    pub video_ts: u32,
-}
-
-/// Arms the keyframe probe.
-///
-/// From now on the next fresh picture the server sends measures how long a
-/// new picture takes to come back. The frame age the HUD reports starts when
-/// a packet leaves the socket buffer, so it cannot see the delay that is
-/// already in front of the client; this probe can, because the moment the
-/// request goes out is a moment the client knows the content of.
-pub(crate) fn arm_keyframe_probe(sent_at: Instant, video_ts: u32) {
-    if let Ok(mut slot) = METRICS.probe_armed_at.lock() {
-        *slot = Some(KeyframeProbe { sent_at, video_ts });
-    }
-}
-
-/// Takes the armed probe, if there is one.
-pub(crate) fn take_keyframe_probe() -> Option<KeyframeProbe> {
-    METRICS
-        .probe_armed_at
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.take())
-}
-
-/// Records how long the probe took.
-///
-/// The round trip is the time from the request until the fresh picture was
-/// completely in hand. A keyframe is large and takes a while to arrive, so
-/// the time it spent on the wire is taken out: what is left is how long the
-/// picture took to come back - the delay that is already in front of the
-/// client when the first packet shows up.
-pub(crate) fn record_keyframe_probe(sent_at: Instant, arrived_at: Instant, on_the_wire: Duration) {
-    let elapsed_us = arrived_at.saturating_duration_since(sent_at).as_micros() as u64;
-    METRICS.probe_last_us.store(elapsed_us, Ordering::Relaxed);
-    METRICS.probe_min_us.fetch_min(elapsed_us, Ordering::Relaxed);
-    let net_us = elapsed_us.saturating_sub(on_the_wire.as_micros() as u64);
-    METRICS.probe_net_last_us.store(net_us, Ordering::Relaxed);
-    METRICS.probe_net_min_us.fetch_min(net_us, Ordering::Relaxed);
-    METRICS.probe_count.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Records a probe result that was thrown away because the picture it
-/// brought back was not captured after the request went out.
-pub(crate) fn note_rejected_probe() {
-    METRICS.probe_rejected.fetch_add(1, Ordering::Relaxed);
-}
-
 /// A distinctive input event waiting for the picture it causes.
 ///
 /// To measure input→photon end to end, the client marks a moment it knows
@@ -772,12 +698,16 @@ pub(crate) struct InputProbe {
 
 /// Arms the input probe.
 ///
-/// The causality floor is the round trip of the *picture* path, measured
-/// the only way the client can: from a keyframe request until the picture
-/// it brings back lands. Anything newer than that could genuinely have
-/// been caused by the input; anything older cannot.
+/// The causality floor is the measured round trip of the *picture* path:
+/// the server's own stretch (`srv`) plus the client's display age. A
+/// picture newer than that could genuinely have been caused by the input;
+/// anything older cannot. The keyframe probe used to supply this floor,
+/// but a keyframe request costs a hitch every time, so the floor is now
+/// derived from numbers that are already measured.
 pub(crate) fn arm_input_probe(sampled_at: Instant, video_ts: u32) {
-    let min_newer_ms = (METRICS.probe_net_min_us.load(Ordering::Relaxed) / 1000) as i64;
+    let server_ms = METRICS.server_offset_us.load(Ordering::Relaxed) / 1000;
+    let age_ms = METRICS.frame_age_last_us.load(Ordering::Relaxed) as i64 / 1000;
+    let min_newer_ms = server_ms.max(0) + age_ms.max(0);
     if let Ok(mut slot) = METRICS.input_probe_armed_at.lock() {
         *slot = Some(InputProbe {
             sampled_at,
@@ -921,13 +851,6 @@ pub(crate) static METRICS: VideoMetrics = VideoMetrics {
     av_stalls: AtomicU64::new(0),
     av_stall_us: AtomicU64::new(0),
     frame_age_last_us: AtomicU64::new(0),
-    probe_armed_at: Mutex::new(None),
-    probe_last_us: AtomicU64::new(0),
-    probe_min_us: AtomicU64::new(u64::MAX),
-    probe_net_last_us: AtomicU64::new(0),
-    probe_net_min_us: AtomicU64::new(u64::MAX),
-    probe_count: AtomicU64::new(0),
-    probe_rejected: AtomicU64::new(0),
     repair_wait_max_us: AtomicU64::new(0),
     repair_wait_sum_us: AtomicU64::new(0),
     audio_sent_samples: AtomicU64::new(0),
@@ -1037,24 +960,10 @@ pub fn video_performance_summary() -> String {
     // the video's `srv` is. Between them they say which side the picture
     // is drifting against.
     let audio_offset_ms = (METRICS.audio_offset_us.load(Ordering::Relaxed) / 1000).clamp(-999, 999);
-    // How long the fresh picture took to come back when it was asked for.
-    // This is the picture's absolute age, the one delay that happens
-    // before the client can see anything at all. BOTH the latest reading
-    // and the best-of-session are shown, because the minimum is the clean
-    // path and the latest is the truth right now: if the picture is
-    // getting older, the latest reading rises while the minimum stays
-    // put, which is the signature of a growing delay that the minimum
-    // alone cannot show.
-    let probe_count = METRICS.probe_count.load(Ordering::Relaxed);
-    let probe_min_us = METRICS.probe_net_min_us.load(Ordering::Relaxed);
-    let probe_last_us = METRICS.probe_net_last_us.load(Ordering::Relaxed);
-    let probe_ms = if probe_count == 0 {
-        // No usable answer yet: the server did not send a picture that was
-        // captured after the request.
-        "?/?".to_owned()
-    } else {
-        format!("{}/{}", (probe_last_us / 1000).min(999), (probe_min_us / 1000).min(999))
-    };
+    // The picture's absolute age: the server's own stretch (`srv`) plus
+    // the client's display age. This replaces the keyframe probe, which
+    // cost a hitch every 10 seconds to measure the same thing.
+    let picture_age_ms = (server_offset_ms.max(0) + METRICS.frame_age_last_us.load(Ordering::Relaxed) as i64 / 1000).clamp(0, 999);
     // The holes in the sound, in milliseconds. Each one is the sound
     // jumping forward in game time, which is the whole of the drift the
     // player feels.
@@ -1064,14 +973,10 @@ pub fn video_performance_summary() -> String {
     // sound in one step.
     let repair_wait_ms = (METRICS.repair_wait_max_us.load(Ordering::Relaxed) / 1000).min(9_999);
     let av_stalls = METRICS.av_stalls.load(Ordering::Relaxed).min(999);
-    // How many probes found a picture that was captured after the request,
-    // and how many found one that was already on its way.
-    let probe_ok = METRICS.probe_count.load(Ordering::Relaxed);
-    let probe_no = METRICS.probe_rejected.load(Ordering::Relaxed);
-    let _ = (probe_ok, probe_no, repair_wait_ms);
+    let _ = repair_wait_ms;
     let audio_lost_ms = METRICS.audio_lost_ms.load(Ordering::Relaxed).clamp(-999, 999);
     format!(
-        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{} rmb:{} stut:{av_stalls} a-def:{audio_lost_ms} in-rate:{input_rate}/s in-wire:{input_wire_avg_us}/{input_wire_max_us}us\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us a-srv:{audio_offset_ms}ms\nsrv:{server_offset_ms}ms drift:{server_drift_ms}ms av-lag:{av_lag_ms}ms ld:{av_lag_drift_ms}ms av-d:{av_out_ms}ms a-del:{audio_delay_ms}ms holes:{holes_ms}ms kp:{probe_ms}ms ip:{input_probe_ms}ms",
+        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{} rmb:{} stut:{av_stalls} a-def:{audio_lost_ms} in-rate:{input_rate}/s in-wire:{input_wire_avg_us}/{input_wire_max_us}us\nhandoff:{} ui-ovr:{} max d>h/h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us a-srv:{audio_offset_ms}ms\nsrv:{server_offset_ms}ms drift:{server_drift_ms}ms av-lag:{av_lag_ms}ms ld:{av_lag_drift_ms}ms av-d:{av_out_ms}ms a-del:{audio_delay_ms}ms holes:{holes_ms}ms pic:{picture_age_ms}ms ip:{input_probe_ms}ms",
         METRICS.decoded.swap(0, Ordering::Relaxed),
         METRICS.presented.swap(0, Ordering::Relaxed),
         METRICS.decode_us.load(Ordering::Relaxed),
