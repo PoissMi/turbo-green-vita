@@ -44,9 +44,9 @@ const MAX_QUEUED_AUDIO_BYTES: u32 = AUDIO_BYTES_PER_SECOND * 50 / 1_000;
 ///
 /// This is now a ceiling with a wide dead band below it. The audio
 /// between the two levels is not trimmed at all, and when the ceiling
-/// is hit only the audio that arrived *after* the last hole is dropped
-/// back to the ceiling's top, so the sound can never be driven forward
-/// by more than the ceiling itself.
+/// is hit only the audio already played is thrown away - the decoded
+/// pipeline is never deleted, because that is a hole in the sound and
+/// the holes are the drift.
 ///
 /// It cannot go much below this: the jitter buffer alone holds 40 ms of
 /// audio and the shell hands it to the device every 15 ms. A ceiling
@@ -271,7 +271,7 @@ impl AudioRenderer {
         }
 
         // Nothing may sit in the client's audio pipeline for longer than
-        // the target. This is the one place where the client gives audio
+        // the ceiling. This is the one place where the client gives audio
         // back, and it is what keeps the sound from falling further and
         // further behind the picture over a long session. It runs before
         // the device is filled, so the queue is emptied and refilled with
@@ -337,49 +337,29 @@ impl AudioRenderer {
         }
     }
 
-    /// Refuses to let the client's own audio delay grow past the ceiling.
+    /// Refuses to let the client's own audio delay grow past the ceiling,
+    /// and never by taking audio the player has not heard yet.
     ///
-    /// The audio that has not been handed to the device yet is the newest
-    /// of it, so it is dropped first: that shortens the delay without a
-    /// hole in the middle of the stream. Only when the delay is still too
-    /// large and the pipeline is empty is the device queue emptied as
-    /// well, and only when emptying it would actually bring the client
-    /// within the ceiling.
+    /// What it can drop is the audio that has *already been played*: it is
+    /// in the device queue, behind the playhead, and removing it shortens
+    /// the delay without leaving a hole in the middle of the stream. The
+    /// decoded pipeline is never touched - it holds nothing but sound the
+    /// player has not heard, and removing it is a hole, and a hole is the
+    /// sound jumping forward in game time, which is exactly the drift the
+    /// player felt building up as he played.
     ///
-    /// The gap this leaves in the sound is the price, and it is the whole
-    /// of what this can ever cost: at most the distance from the dead
-    /// band to the ceiling, once per pump that is genuinely over. It can
-    /// never compound, so the sound can never be driven forward by more
-    /// than the ceiling.
+    /// It clears the device queue only when the delay is over the ceiling
+    /// *and* clearing it would actually bring the delay back inside the
+    /// ceiling - clearing it while the pipeline alone is already over the
+    /// ceiling would do nothing but silence the sound.
+    ///
+    /// This used to delete decoded audio and left `a-del` and `holes` at
+    /// their clamps while the speakers went silent: the player heard the
+    /// trim cutting his own audio.
     fn trim_to_target(&mut self) {
         use crate::streaming::video::metrics::{METRICS, client_audio_delay_samples};
         let ceiling = AUDIO_MAX_DELAY_MS * 48;
         if client_audio_delay_samples() <= AUDIO_TRIM_ABOVE_MS * 48 {
-            return;
-        }
-        // Drop the oldest decoded audio first. That is the audio the
-        // player would hear latest, and it is the only audio whose
-        // removal actually shortens the delay: dropping the newest would
-        // shrink the count on paper while the player still heard the old
-        // sound, which is how the earlier meter lied while the delay
-        // stayed.
-        //
-        // The cost is a hole: the sound jumps forward by exactly what
-        // was dropped, and that is the drift the player feels. The dead
-        // band above is what keeps that cost bounded and rare - this
-        // only runs when the client is genuinely hoarding, never for
-        // ordinary jitter.
-        while client_audio_delay_samples() > ceiling {
-            let Some(samples) = self.pending_pcm.pop_front() else {
-                break;
-            };
-            let dropped = (samples.len() / AUDIO_CHANNELS) as u64;
-            METRICS
-                .audio_trimmed_samples
-                .fetch_add(dropped, std::sync::atomic::Ordering::Relaxed);
-        }
-        let delay = client_audio_delay_samples();
-        if delay <= ceiling {
             return;
         }
         let queued_samples =
@@ -388,7 +368,9 @@ impl AudioRenderer {
             return;
         }
         // What is left in the pipeline on its own. If that is already
-        // more than the ceiling, emptying the device queue would not help.
+        // more than the ceiling, emptying the device queue would leave
+        // the player in silence for nothing.
+        let delay = client_audio_delay_samples();
         if delay.saturating_sub(queued_samples) > ceiling {
             return;
         }
