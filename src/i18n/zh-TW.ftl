@@ -23,6 +23,7 @@ settings-rear-touch-enabled = 啟用背面觸控操作
 settings-cloud-host = 雲端主機: { $host }
 settings-home-host = 本地主機: { $host }
 settings-stream-debug-info = 顯示串流偵錯資訊
+settings-stream-log = 將工作階段記錄寫入 SD 卡
 action-back = 返回
 
 mode-select-cloud-subtitle = 透過 Xbox Cloud Gaming 暢玩

@@ -1,3 +1,4 @@
+use crate::logging::{DEFAULT_INTERVAL, Throttle, throttled};
 use crate::streaming::video::VideoDecodeWorker;
 use bytes::Bytes;
 use h264_reader::annexb::AnnexBReader;
@@ -15,6 +16,11 @@ use std::time::{Duration, Instant};
 
 const MAX_PENDING_AUDIO_PACKETS: usize = 32;
 const MAX_H264_ACCESS_UNIT_BYTES: usize = 2 * 1024 * 1024;
+/// The decoder queue was full and a frame was dropped. Throttled, because
+/// it happens once per dropped frame.
+static LOG_QUEUE_FULL: Throttle = Throttle::new(DEFAULT_INTERVAL);
+/// The server sent a picture the decoder cannot take.
+static LOG_TOO_LARGE: Throttle = Throttle::new(DEFAULT_INTERVAL);
 const VIDEO_RTP_CLOCK_RATE: u32 = 90_000;
 const AUDIO_MAX_LATE_PACKETS: u16 = 32;
 /// How long the jitter buffer waits for a late audio packet before it gives
@@ -654,9 +660,12 @@ impl VideoRtp {
             .resolution
             .is_some_and(|(width, height)| width > self.max_width || height > self.max_height);
         if sample_too_large {
-            eprintln!(
-                "Dropping H264 access unit larger than decoder: {:?} > {}x{}",
-                unit.resolution, self.max_width, self.max_height
+            throttled(
+                &LOG_TOO_LARGE,
+                format_args!(
+                    "Dropping H264 access unit larger than decoder: {:?} > {}x{}",
+                    unit.resolution, self.max_width, self.max_height
+                ),
             );
             self.stream_too_large = true;
             // Flush queued decoder work once, then wait for a compatible IDR instead of feeding
@@ -697,7 +706,15 @@ impl VideoRtp {
             self.source_frame_duration_us,
             completed.first_packet_at,
         ) {
-            eprintln!("Video decoder queue is full; continuing while requesting a keyframe");
+            // This fires once per dropped frame, and a drop is exactly
+            // what happens when the pipeline is already behind. Printing
+            // it per drop made the lag arrive faster, because the print
+            // happens on the thread that has to drain the socket. The
+            // count is on the HUD (`q:`); the message is throttled.
+            throttled(
+                &LOG_QUEUE_FULL,
+                format_args!("Video decoder queue is full; continuing while requesting a keyframe"),
+            );
             *keyframe_requested = true;
             stats.dropped = stats.dropped.saturating_add(1);
         }

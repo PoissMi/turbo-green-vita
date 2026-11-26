@@ -23,6 +23,7 @@ settings-rear-touch-enabled = Arka dokunmatik kontrollerini etkinleştir
 settings-cloud-host = Bulut ana makinesi: { $host }
 settings-home-host = Ev ana makinesi: { $host }
 settings-stream-debug-info = Akış hata ayıklama bilgilerini göster
+settings-stream-log = Oturum günlüğünü SD karta yaz
 action-back = Geri
 
 mode-select-cloud-subtitle = Xbox Cloud Gaming ile oyun oyna

@@ -148,6 +148,15 @@ pub struct Settings {
     pub max_bitrate: MaxBitrate,
     /// Shows internal stream/session state on the `Streaming` screen. Off by default.
     pub show_stream_debug_info: bool,
+    /// Writes the 1 Hz status line of every session to
+    /// `ux0:data/xcloud-rust/stream.log` when the session ends.
+    ///
+    /// The file is written once, at the end of the session, so it costs
+    /// nothing while the stream is running. It is the trajectory of the
+    /// session, which is what tells whether the picture falls behind and
+    /// where the time goes - so it is off by default, and this turns it on
+    /// for a session that is being looked into.
+    pub log_stream: bool,
     pub game_profiles: HashMap<String, GameProfile>,
 }
 
@@ -178,6 +187,7 @@ impl Default for Settings {
             locale: Locale::default(),
             max_bitrate: MaxBitrate::default(),
             show_stream_debug_info: false,
+            log_stream: true,
             game_profiles: HashMap::new(),
         }
     }

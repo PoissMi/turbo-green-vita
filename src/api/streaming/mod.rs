@@ -26,10 +26,12 @@ impl PlaybackBackend {
     pub(crate) fn start_xbox(
         stream: Stream,
         max_bitrate_kbps: u32,
+        log_stream: bool,
     ) -> Result<Self> {
         Ok(Self::Xbox(XboxStreamingBackend::start(
             stream,
             max_bitrate_kbps,
+            log_stream,
         )?))
     }
 

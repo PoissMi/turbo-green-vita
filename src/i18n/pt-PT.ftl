@@ -23,6 +23,7 @@ settings-rear-touch-enabled = Ativar controlos do painel traseiro
 settings-cloud-host = Anfitrião da nuvem: { $host }
 settings-home-host = Anfitrião local: { $host }
 settings-stream-debug-info = Mostrar informações de depuração do streaming
+settings-stream-log = Gravar o registo da sessão no cartão SD
 action-back = Voltar
 
 mode-select-cloud-subtitle = Jogos via Xbox Cloud Gaming

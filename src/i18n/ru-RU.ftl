@@ -23,6 +23,7 @@ settings-rear-touch-enabled = Включить управление с задн�
 settings-cloud-host = Облачный хост: { $host }
 settings-home-host = Домашний хост: { $host }
 settings-stream-debug-info = Показывать отладочную информацию трансляции
+settings-stream-log = Записывать журнал сессии на SD-карту
 action-back = Назад
 
 mode-select-cloud-subtitle = Игры через Xbox Cloud Gaming

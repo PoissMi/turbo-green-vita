@@ -1,6 +1,10 @@
 use crate::api::streaming::rtc::media::{AudioReceiver, VideoReceiver};
 use crate::api::streaming::rtc::transport::RtcTransport;
 use crate::streaming::input::{GamepadFrame, PointerEvent};
+use crate::streaming::video::metrics::{
+    PUMP_STAGE_CTRL, PUMP_STAGE_DECODE, PUMP_STAGE_EVENTS, PUMP_STAGE_FLUSH, PUMP_STAGE_HANDLE,
+    PUMP_STAGE_MSGS, PUMP_STAGE_SOCKET, PUMP_STAGE_STATUS, record_pump_stage,
+};
 use crate::streaming::video::{DecoderConfig, DirectVideoOutput};
 use anyhow::{Context, Result};
 use rtc::peer_connection::RTCPeerConnection;
@@ -11,34 +15,13 @@ use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::RTCIceCandidateInit;
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 use rtc::sansio::Protocol;
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const KEYFRAME_REQUEST_COOLDOWN: Duration = Duration::from_millis(120);
-/// How often a fresh picture is asked for to measure how long the picture
-/// takes to come back. The request is a real one, so it costs a keyframe on
-/// the wire; the interval keeps that rare enough to not disturb the stream.
-const BANDWIDTH_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 const INITIAL_VIDEO_GRACE: Duration = Duration::from_millis(500);
 const INITIAL_VIDEO_KEYFRAME_INTERVAL: Duration = Duration::from_millis(500);
-/// The server is never asked for less than this, so a struggling path
-/// degrades in quality instead of collapsing the stream.
-const MIN_BANDWIDTH_ESTIMATE_KBPS: u32 = 1500;
-/// The server's video timeline slipping by more than this over a minute means
-/// a queue is growing in front of us.
-///
-/// It was 25 ms, so a picture getting 25 ms older in a minute was left
-/// alone while it accumulated. At 6 ms/min the user already feels it, so
-/// the threshold is 10: a queue that grows is grown by the rate the server
-/// is asked for, and that is the one thing this client controls.
-const DRIFT_BACKOFF_MS: i64 = 10;
-/// Below this the path is keeping up, so the estimate may climb again.
-const DRIFT_RECOVER_MS: i64 = 5;
-/// The video falling this far behind the audio over a minute means the
-/// server's encoder is not keeping up with the rate we ask for.
-const AV_LAG_BACKOFF_MS: i64 = 10;
-/// Below this the video may be climbing back towards the audio.
-const AV_LAG_RECOVER_MS: i64 = 5;
 /// The frame rate we advertise to the server.
 ///
 /// The server does not take this from what we ask: the upstream client
@@ -49,12 +32,37 @@ const AV_LAG_RECOVER_MS: i64 = 5;
 /// a setting.
 pub(crate) const REQUESTED_VIDEO_FPS: u32 = 60;
 
+/// Where the 1 Hz status lines of a session are kept.
+const STREAM_LOG_DIR: &str = "ux0:data/xcloud-rust";
+const STREAM_LOG_PATH: &str = "ux0:data/xcloud-rust/stream.log";
+/// How many status lines are kept in memory. At one line per second this
+/// is an hour of session, which is far more than any session that has to
+/// be looked at afterwards.
+const MAX_STREAM_LOG_LINES: usize = 3600;
+
+/// Records how long the stage that just ended took, and starts the next
+/// one.
+///
+/// The cycle used to be timed as a whole, which says that it got slower
+/// but not what inside it owns the time. The stages are the socket drain,
+/// the message handling, the decoder drain, the control work and the
+/// status line, and they are timed apart so the worst cycle can be
+/// attributed to one of them.
+#[inline]
+fn record_stage(stage: usize, stage_started: &mut Instant) {
+    let elapsed = stage_started.elapsed().as_micros() as u64;
+    crate::streaming::video::metrics::record_pump_stage(stage, elapsed);
+    *stage_started = Instant::now();
+}
+
 pub(crate) struct RtcSessionConfig {
     pub stun_server: &'static str,
     pub route_probe: &'static str,
     pub audio_sample_rate: u32,
     pub audio_payload_type: u8,
     pub max_video_bitrate_kbps: u32,
+    /// Whether the session's status lines are written to the session log.
+    pub log_stream: bool,
     pub decoder: DecoderConfig,
 }
 
@@ -85,13 +93,25 @@ pub(crate) struct RtcSession<B: RtcSessionBackend> {
     pub(crate) video: VideoReceiver,
     pub(crate) audio: AudioReceiver,
     max_video_bitrate_kbps: u32,
-    /// What we currently ask the server for. The user's setting is the
-    /// ceiling; this is what the path has actually proven it can carry.
-    bandwidth_estimate_kbps: u32,
-    last_bandwidth_report: Option<Instant>,
+    /// Whether the 1 Hz status lines are kept for the session log.
+    ///
+    /// The REMB governor that used to sit here is gone: over a whole
+    /// session the delivered bitrate did not follow the estimate at all
+    /// (`net = 2358 + 0.007 × rmb`, R² = 0.000), so the server ignores the
+    /// REMB and the estimate only ever produced a number that looked like
+    /// control without being any.
+    log_stream: bool,
     last_keyframe_request: Option<Instant>,
     initial_video_watchdog_started_at: Option<Instant>,
     last_initial_video_keyframe_request: Option<Instant>,
+    /// The 1 Hz status lines of this session, kept in memory.
+    ///
+    /// They used to be written to `ux0:data/xcloud-rust/stream.log` from the
+    /// pump thread, once a second, with a flush after every line. That put
+    /// a blocking SD-card write on the one thread that has to keep up with
+    /// the incoming stream, and the file was the cheapest thing to take
+    /// off that path. The lines are written once, when the session ends.
+    stream_log_lines: VecDeque<String>,
     pub status: String,
 }
 
@@ -120,11 +140,11 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             video,
             audio: AudioReceiver::new(config.audio_sample_rate, config.audio_payload_type),
             max_video_bitrate_kbps: config.max_video_bitrate_kbps,
-            bandwidth_estimate_kbps: config.max_video_bitrate_kbps,
-            last_bandwidth_report: None,
+            log_stream: config.log_stream,
             last_keyframe_request: None,
             initial_video_watchdog_started_at: None,
             last_initial_video_keyframe_request: None,
+            stream_log_lines: VecDeque::new(),
             status: "Negotiating WebRTC connection".to_owned(),
         })
     }
@@ -148,6 +168,9 @@ impl<B: RtcSessionBackend> RtcSession<B> {
     }
 
     pub fn close(&mut self) -> Result<()> {
+        // The session log is written here: the stream is over, so the
+        // SD-card write can no longer delay a picture.
+        self.write_stream_log();
         self.peer
             .close()
             .context("failed to close rtc peer connection")
@@ -160,15 +183,29 @@ impl<B: RtcSessionBackend> RtcSession<B> {
     }
 
     pub async fn pump(&mut self) -> Result<Vec<RTCIceCandidateInit>> {
+        let pump_started = Instant::now();
+        let mut stage_started = pump_started;
+
         self.transport.flush(&mut self.peer).await;
-        self.transport.receive(&mut self.peer);
+        record_stage(PUMP_STAGE_FLUSH, &mut stage_started);
+
+        let (socket_us, handle_us) = self.transport.receive(&mut self.peer);
+        record_pump_stage(PUMP_STAGE_SOCKET, socket_us);
+        record_pump_stage(PUMP_STAGE_HANDLE, handle_us);
+        stage_started = Instant::now();
+
         let gathered_candidates = self.handle_peer_events();
+        record_stage(PUMP_STAGE_EVENTS, &mut stage_started);
+
         let mut keyframe_requested = self.handle_peer_messages();
+        record_stage(PUMP_STAGE_MSGS, &mut stage_started);
+
         // Drain AFTER receiving: decode results produced since the last pump
         // must be picked up in the same iteration so the worker's frame
         // queue sees them before the next pump overwrites them. Draining
         // before receive stranded them one pump cycle and counted as `repl`.
         self.video.drain_decoder(&mut keyframe_requested);
+        record_stage(PUMP_STAGE_DECODE, &mut stage_started);
 
         let now = Instant::now();
         // rtc-rs is sans-I/O, so its expired internal timer must be advanced by our pump.
@@ -183,14 +220,8 @@ impl<B: RtcSessionBackend> RtcSession<B> {
         }
         self.request_keyframe(keyframe_requested, now);
         self.video.flush_nacks(&mut self.peer);
-        if self
-            .last_bandwidth_report
-            .is_none_or(|previous| now.duration_since(previous) >= BANDWIDTH_REPORT_INTERVAL)
-        {
-            self.last_bandwidth_report = Some(now);
-            let estimate = self.next_bandwidth_estimate();
-            self.video.send_bandwidth_estimate(&mut self.peer, (estimate * 1000) as f32);
-        }
+        record_stage(PUMP_STAGE_CTRL, &mut stage_started);
+
         if let Some(status) = self.video.status(now) {
             let server = self
                 .backend
@@ -201,75 +232,84 @@ impl<B: RtcSessionBackend> RtcSession<B> {
                 "cap:{}kbps fps:{} {server} {status}",
                 self.max_video_bitrate_kbps, REQUESTED_VIDEO_FPS
             );
-            eprintln!("{}", self.status);
+            // The status line goes to the HUD, and into the in-memory
+            // session log. Nothing is written to a file or to the console
+            // from here: this thread has to keep up with the stream, and a
+            // write syscall on it is time the picture does not get.
+            self.record_status_line();
         }
+        record_stage(PUMP_STAGE_STATUS, &mut stage_started);
+
+        // Worst pump-cycle duration: a long cycle is video age added
+        // proportional to the burst (bitrate) — this is the number that
+        // would show a Cause-B stall while age/pr stay green.
+        crate::streaming::video::metrics::METRICS
+            .pump_max_us
+            .fetch_max(pump_started.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
 
         Ok(gathered_candidates)
     }
 
-    /// Decides what to ask the server for next.
+    /// Keeps the 1 Hz status line in memory.
     ///
-    /// The server sizes its encoder from our REMB. If it then sends faster
-    /// than the path can carry, the video piles up in a queue in front of us:
-    /// every frame arrives later than the one before, so the picture falls
-    /// steadily behind reality while every client-side number still looks
-    /// perfect. The input suffers with it, because the server reads the
-    /// controller from behind the same backlog - which is exactly the "the
-    /// character reacts late" symptom.
+    /// The line used to be written to disk from the pump thread. Writing it
+    /// once per second is not a small cost when the file lives on the
+    /// Vita's SD card: the write blocks until the card accepts it, and the
+    /// pump thread is the one that has to drain the socket. The line is
+    /// buffered here and written once, when the session ends.
+    fn record_status_line(&mut self) {
+        if !self.log_stream {
+            return;
+        }
+        if self.stream_log_lines.is_empty() {
+            // The first line of the log says what the session was: the cap
+            // it asked for, and how fast the two user CPUs turned out to
+            // be. The receive path runs on the faster one, and that ratio
+            // is what decides how much of the bitrate the client can keep
+            // up with.
+            let header = format!(
+                "# cap:{}kbps cpu:{}",
+                self.max_video_bitrate_kbps,
+                crate::streaming::video::metrics::cpu_benchmark_text()
+            );
+            self.stream_log_lines.push_back(header);
+        }
+        let secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        self.stream_log_lines
+            .push_back(format!("{secs} {}", self.status));
+        while self.stream_log_lines.len() > MAX_STREAM_LOG_LINES {
+            self.stream_log_lines.pop_front();
+        }
+    }
+
+    /// Writes the buffered status lines to the session log.
     ///
-    /// `server_drift_us` measures that pile-up directly, so the estimate can
-    /// back off instead of asking for a rate the path cannot sustain. The
-    /// user's setting stays the ceiling: the estimate climbs back towards it
-    /// whenever the path keeps up.
-    fn next_bandwidth_estimate(&mut self) -> u32 {
-        // The user's setting is the ceiling. Nothing clamps it: the bitrate
-        // the server is asked for is exactly what was chosen.
-        let ceiling = self
-            .max_video_bitrate_kbps
-            .max(MIN_BANDWIDTH_ESTIMATE_KBPS);
-        let drift_ms = crate::streaming::video::metrics::METRICS
-            .server_drift_us
-            .load(std::sync::atomic::Ordering::Relaxed)
-            / 1000;
-        // How much the video has fallen behind the audio over the last
-        // minute. The audio is mixed from the game clock and the video from
-        // the same clock, so the two drifting apart means the video is
-        // being delivered from an older point in the game - the encoder
-        // cannot keep up.
-        let av_drift_ms = crate::streaming::video::metrics::METRICS
-            .av_lag_drift_us
-            .load(std::sync::atomic::Ordering::Relaxed)
-            / 1000;
-        let current = self
-            .bandwidth_estimate_kbps
-            .max(MIN_BANDWIDTH_ESTIMATE_KBPS);
-        // The governor reacts to the picture falling *further* behind, not
-        // to it being behind in the first place.
-        //
-        // A server that is simply slow shows a constant delay, and a
-        // constant delay is not something a lower bitrate can fix - so
-        // reacting to it would only throw the picture away for nothing.
-        // What a lower bitrate can fix is a delay that keeps growing,
-        // because that is the encoder falling behind its own clock.
-        let struggling = drift_ms > DRIFT_BACKOFF_MS || av_drift_ms > AV_LAG_BACKOFF_MS;
-        let healthy = drift_ms < DRIFT_RECOVER_MS && av_drift_ms < AV_LAG_RECOVER_MS;
-        let next = if struggling {
-            // The queue is growing: ask for noticeably less than we get.
-            (current * 85 / 100).max(MIN_BANDWIDTH_ESTIMATE_KBPS)
-        } else if healthy {
-            // The path is keeping up: climb back towards the ceiling.
-            current
-                .saturating_add(ceiling.saturating_sub(current) / 8)
-                .saturating_add(50)
-                .min(ceiling)
-        } else {
-            current
-        };
-        self.bandwidth_estimate_kbps = next;
-        crate::streaming::video::metrics::METRICS
-            .bandwidth_estimate_kbps
-            .store(u64::from(next), std::sync::atomic::Ordering::Relaxed);
-        next
+    /// Called when the session ends, so the file write is off the path
+    /// that has to keep up with the stream.
+    fn write_stream_log(&mut self) {
+        if self.stream_log_lines.is_empty() {
+            return;
+        }
+        let mut text = String::with_capacity(self.stream_log_lines.len() * 700);
+        for line in &self.stream_log_lines {
+            text.push_str(line);
+            text.push('\n');
+        }
+        self.stream_log_lines.clear();
+
+        let _ = std::fs::create_dir_all(STREAM_LOG_DIR);
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(STREAM_LOG_PATH)
+        {
+            use std::io::Write;
+            let _ = file.write_all(text.as_bytes());
+            let _ = file.flush();
+        }
     }
 
     fn initial_video_keyframe_due(&mut self, now: Instant) -> bool {
@@ -384,5 +424,15 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.backend.notify_keyframe_requested(&mut self.peer);
         self.video.request_keyframe(&mut self.peer);
+    }
+}
+
+/// Writes the session log when the session goes away for any reason.
+///
+/// `close()` already does this on the normal path; this covers the ones
+/// that end without it (the peer closed, the worker was torn down).
+impl<B: RtcSessionBackend> Drop for RtcSession<B> {
+    fn drop(&mut self) {
+        self.write_stream_log();
     }
 }

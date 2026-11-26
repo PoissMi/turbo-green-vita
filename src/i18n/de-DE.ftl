@@ -23,6 +23,7 @@ settings-rear-touch-enabled = Steuerung über Rückseiten-Touch aktivieren
 settings-cloud-host = Cloud-Host: { $host }
 settings-home-host = Heim-Host: { $host }
 settings-stream-debug-info = Streaming-Debuginfos anzeigen
+settings-stream-log = Sitzungsprotokoll auf die SD-Karte schreiben
 action-back = Zurück
 
 mode-select-cloud-subtitle = Spiele über Xbox Cloud Gaming

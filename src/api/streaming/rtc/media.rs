@@ -1,4 +1,5 @@
 use crate::api::streaming::rtc::rtp;
+use crate::logging::{DEFAULT_INTERVAL, Throttle, throttled};
 use crate::streaming::video::{DecodedFrame, DecoderConfig, DirectVideoOutput, VideoDecodeWorker};
 use anyhow::Result;
 use bytes::Bytes;
@@ -13,6 +14,10 @@ use std::time::{Duration, Instant};
 const STREAM_STATS_INTERVAL: Duration = Duration::from_secs(1);
 /// Decoded frames kept for the UI to display, one per display frame.
 const DECODED_QUEUE_DEPTH: usize = 4;
+/// A frame the decoder could not decode. Throttled: a decoder that is
+/// failing tends to fail on every frame, and the pump thread cannot
+/// afford one console line per frame.
+static LOG_DECODE: Throttle = Throttle::new(DEFAULT_INTERVAL);
 
 #[derive(Default)]
 struct VideoStats {
@@ -131,7 +136,10 @@ impl VideoReceiver {
                     }
                 }
                 Err(error) => {
-                    eprintln!("Failed to decode H264 video frame: {error}");
+                    throttled(
+                        &LOG_DECODE,
+                        format_args!("Failed to decode H264 video frame: {error}"),
+                    );
                     decode_errors = decode_errors.saturating_add(1);
                     *keyframe_requested = true;
                 }
@@ -206,20 +214,6 @@ impl VideoReceiver {
             let _ = receiver.write_rtcp(vec![Box::new(nack)]);
             self.stats.nacks_sent =
                 self.stats.nacks_sent.saturating_add(sequences.len() as u64);
-        }
-    }
-
-    /// Advertises receive bandwidth to the sender via REMB; xCloud uses this to size its encoder.
-    pub(crate) fn send_bandwidth_estimate(&self, peer: &mut RTCPeerConnection, bitrate: f32) {
-        if let (Some(receiver_id), Some(ssrc)) = (self.receiver_id, self.ssrc)
-            && let Some(mut receiver) = peer.rtp_receiver(receiver_id)
-        {
-            let remb = rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate {
-                sender_ssrc: 0,
-                bitrate,
-                ssrcs: vec![ssrc],
-            };
-            let _ = receiver.write_rtcp(vec![Box::new(remb)]);
         }
     }
 

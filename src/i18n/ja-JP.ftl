@@ -23,6 +23,7 @@ settings-rear-touch-enabled = 背面タッチ操作を有効にする
 settings-cloud-host = クラウドホスト: { $host }
 settings-home-host = ホームホスト: { $host }
 settings-stream-debug-info = ストリーミングのデバッグ情報を表示
+settings-stream-log = セッションログをSDカードに書き出す
 action-back = 戻る
 
 mode-select-cloud-subtitle = Xbox Cloud Gaming でゲームをプレイ

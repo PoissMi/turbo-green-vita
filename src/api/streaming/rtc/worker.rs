@@ -221,14 +221,29 @@ fn run_worker_thread<P: RtcWorkerProvider>(
 #[cfg(target_os = "vita")]
 fn prioritize_rtc_thread() {
     let thread_id = unsafe { vitasdk_sys::sceKernelGetThreadId() };
-    let affinity_result = unsafe {
-        vitasdk_sys::sceKernelChangeThreadCpuAffinityMask(
-            thread_id,
-            vitasdk_sys::SCE_KERNEL_CPU_MASK_USER_1 as i32,
-        )
+
+    // The receive path is paid per packet, in software, and it is the most
+    // expensive thing this client does. Which core it runs on decides how
+    // fast that is: the Vita's two cores are not the same speed, and the
+    // mask this thread was pinned to is one of them. So measure both,
+    // and run the crypto on whichever is faster.
+    let benchmark = benchmark_user_cpus(thread_id);
+    let user_0 = vitasdk_sys::SCE_KERNEL_CPU_MASK_USER_0 as i32;
+    let user_1 = vitasdk_sys::SCE_KERNEL_CPU_MASK_USER_1 as i32;
+    // Only move away from the current placement if the other core is
+    // clearly faster: a noisy measurement must not put the receive path on
+    // the wrong core.
+    let mask = if benchmark.user_0_ns * 100 <= benchmark.user_1_ns * 80 {
+        user_0
+    } else {
+        user_1
     };
+    crate::streaming::video::metrics::record_cpu_benchmark(benchmark);
+
+    let affinity_result =
+        unsafe { vitasdk_sys::sceKernelChangeThreadCpuAffinityMask(thread_id, mask) };
     if affinity_result < 0 {
-        eprintln!("Failed to pin RTC thread to user CPU 1: {affinity_result:#x}");
+        eprintln!("Failed to pin RTC thread to a user CPU: {affinity_result:#x}");
     }
 
     let result = unsafe {
@@ -238,6 +253,59 @@ fn prioritize_rtc_thread() {
     };
     if result < 0 {
         eprintln!("Failed to maximize RTC thread priority: {result}");
+    }
+}
+
+/// A fixed piece of work, used to compare the two user CPUs.
+///
+/// It is table lookups and multiplies, which is what the SRTP decryption
+/// is: arithmetic and memory in the L1 cache. The point is not the
+/// absolute speed but the ratio between the cores.
+#[cfg(target_os = "vita")]
+fn cpu_probe_workload() -> u64 {
+    let mut table = [0u32; 512];
+    for (index, slot) in table.iter_mut().enumerate() {
+        *slot = (index as u32).wrapping_mul(2_654_435_761);
+    }
+    let mut accumulator = 0u64;
+    for _ in 0..32 {
+        for (index, value) in table.iter_mut().enumerate() {
+            let mixed = value.rotate_left(7) ^ index as u32;
+            *value = mixed.wrapping_mul(2_246_822_519);
+            accumulator = accumulator.wrapping_add(mixed as u64);
+        }
+    }
+    std::hint::black_box(accumulator)
+}
+
+/// Runs the same work on each user CPU and returns how long each took.
+///
+/// The best of three runs is used for each core: the fastest run is the
+/// one that was not interrupted, and the OS shares the slower core with
+/// the system, so a single sample says more about the scheduler than about
+/// the core.
+#[cfg(target_os = "vita")]
+fn benchmark_user_cpus(thread_id: i32) -> crate::streaming::video::metrics::CpuBenchmark {
+    let user_0 = vitasdk_sys::SCE_KERNEL_CPU_MASK_USER_0 as i32;
+    let user_1 = vitasdk_sys::SCE_KERNEL_CPU_MASK_USER_1 as i32;
+    let mut user_0_ns = u64::MAX;
+    let mut user_1_ns = u64::MAX;
+    for _ in 0..3 {
+        for mask in [user_0, user_1] {
+            unsafe { vitasdk_sys::sceKernelChangeThreadCpuAffinityMask(thread_id, mask) };
+            let started = std::time::Instant::now();
+            std::hint::black_box(cpu_probe_workload());
+            let elapsed = started.elapsed().as_nanos() as u64;
+            if mask == user_0 {
+                user_0_ns = user_0_ns.min(elapsed);
+            } else {
+                user_1_ns = user_1_ns.min(elapsed);
+            }
+        }
+    }
+    crate::streaming::video::metrics::CpuBenchmark {
+        user_0_ns,
+        user_1_ns,
     }
 }
 

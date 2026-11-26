@@ -1,3 +1,4 @@
+use crate::logging::{DEFAULT_INTERVAL, Throttle, throttled};
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use sdl2::audio::{AudioQueue, AudioSpecDesired};
@@ -7,6 +8,13 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_cha
 
 pub const AUDIO_SAMPLE_RATE: i32 = 48_000;
 const AUDIO_CHANNELS: usize = 2;
+
+/// The device queue refused a buffer. Throttled, because it happens per
+/// buffer and the audio thread is on the critical path of the sound.
+static LOG_QUEUE: Throttle = Throttle::new(DEFAULT_INTERVAL);
+/// A packet the Opus decoder could not decode. Throttled for the same
+/// reason.
+static LOG_OPUS: Throttle = Throttle::new(DEFAULT_INTERVAL);
 
 const AUDIO_BYTES_PER_SECOND: u32 = AUDIO_SAMPLE_RATE as u32 * AUDIO_CHANNELS as u32 * 2;
 /// Hard cap on the audio queued in the device.
@@ -298,7 +306,10 @@ impl AudioRenderer {
                 break;
             }
             if let Err(error) = self.queue.queue_audio(&samples) {
-                eprintln!("Failed to queue SDL audio: {error}");
+                throttled(
+                    &LOG_QUEUE,
+                    format_args!("Failed to queue SDL audio: {error}"),
+                );
             } else {
                 // The audio that reached the device. The difference between
                 // this and what was decoded is the audio still waiting for
@@ -426,7 +437,13 @@ fn spawn_decode_worker() -> Result<(SyncSender<Bytes>, Receiver<Vec<i16>>)> {
                 let samples_per_channel = match decoder.decode(&packet, &mut decode_buf) {
                     Ok(samples_per_channel) => samples_per_channel,
                     Err(error) => {
-                        eprintln!("Failed to decode Opus audio packet: {error}");
+                        // One line per broken packet would be one line per
+                        // 20 ms of sound; the decode thread has no budget
+                        // for that.
+                        throttled(
+                            &LOG_OPUS,
+                            format_args!("Failed to decode Opus audio packet: {error}"),
+                        );
                         continue;
                     }
                 };

@@ -7,6 +7,35 @@ use std::time::{Duration, Instant};
 /// a stutter: the picture lost ground with the sound in one go.
 const STALL_STEP_SECONDS: f64 = 0.030;
 
+/// The parts of one RTC pump cycle, in the order they run.
+///
+/// The cycle used to be measured as a single number, which says that it
+/// got slower but not which part of it owns the time. Each stage is timed
+/// on its own so the worst cycle can be attributed.
+pub(crate) const PUMP_STAGE_FLUSH: usize = 0;
+/// Sending the queued datagrams.
+pub(crate) const PUMP_STAGE_SOCKET: usize = 1;
+/// Reading the socket. Split from the handling below, because a receive
+/// cycle that takes tens of milliseconds can be either the socket read
+/// itself or the work done on what it read.
+pub(crate) const PUMP_STAGE_HANDLE: usize = 2;
+/// The packet handling: SRTP decryption and the RTP parse.
+pub(crate) const PUMP_STAGE_EVENTS: usize = 3;
+/// Peer events (track open, connection state).
+pub(crate) const PUMP_STAGE_MSGS: usize = 4;
+/// The RTP messages: reassembly and the hand-off to the decoder.
+pub(crate) const PUMP_STAGE_DECODE: usize = 5;
+/// Taking the decoded frames out of the decoder worker.
+pub(crate) const PUMP_STAGE_CTRL: usize = 6;
+/// Timeouts, keyframe requests, NACKs and the bandwidth report.
+pub(crate) const PUMP_STAGE_STATUS: usize = 7;
+/// Building the 1 Hz status line the HUD shows.
+pub(crate) const PUMP_STAGE_COUNT: usize = 8;
+
+/// The one-letter names the HUD uses for the stages.
+pub(crate) const PUMP_STAGE_NAMES: [&str; PUMP_STAGE_COUNT] =
+    ["f", "so", "hd", "e", "m", "d", "c", "s"];
+
 pub(crate) struct VideoMetrics {
     pub(crate) rtp_assembly_sum_us: AtomicU64,
     pub(crate) rtp_assembly_count: AtomicU64,
@@ -100,14 +129,39 @@ pub(crate) struct VideoMetrics {
     /// value means the video is arriving later and later: the picture is
     /// lagging behind reality more and more.
     pub(crate) server_drift_us: AtomicI64,
-    /// The bitrate we currently ask the server for, in kbps. The user's
-    /// setting is the ceiling; this is what we believe the path can carry.
-    pub(crate) bandwidth_estimate_kbps: AtomicU64,
     /// Packets drained from the socket per receive call. A rising batch size
     /// means packets are piling up in the client's own receive buffer.
     pub(crate) rx_batch_sum: AtomicU64,
     pub(crate) rx_batch_max: AtomicU64,
     pub(crate) rx_batch_count: AtomicU64,
+    /// Worst RTC pump cycle duration in the window (µs): socket drain
+    /// through decode drain and RTCP. A long cycle is video age added
+    /// proportional to the burst — i.e. bitrate.
+    pub(crate) pump_max_us: AtomicU64,
+    /// Per-stage pump timing: the worst cycle of the window and the
+    /// standing average, so the HUD can say which part of the cycle owns
+    /// the time instead of only that the cycle got slower.
+    pub(crate) pump_stage_max_us: [AtomicU64; PUMP_STAGE_COUNT],
+    pub(crate) pump_stage_sum_us: [AtomicU64; PUMP_STAGE_COUNT],
+    pub(crate) pump_stage_count: [AtomicU64; PUMP_STAGE_COUNT],
+    /// Packets read from the socket in the window. The packet rate is what
+    /// the receive path is actually paid for: it scales with the bitrate,
+    /// and it is the number that decides how much of the CPU the SRTP
+    /// decryption costs.
+    pub(crate) rx_packets: AtomicU64,
+    /// The worst receive cycle of the window, packed as
+    /// `(microseconds << 20) | packets`, so the number of packets that
+    /// came with the slowest cycle comes with it. Without it, the cost per
+    /// packet cannot be told from a cost per cycle.
+    pub(crate) recv_cycle_packed: AtomicU64,
+    /// UDP datagrams flushed per cycle (ALL traffic, not SCTP alone:
+    /// RTCP, SCTP control and data all exit via `poll_write`).
+    /// This is NOT an SCTP queue metric — the fork exposes no public
+    /// `pending_queue`/`cwnd`/`rwnd` accessor; `Association::buffered_amount`
+    /// is `pub(crate)`. Do not infer queue health from this field.
+    pub(crate) sctp_out_max: AtomicU64,
+    pub(crate) sctp_out_sum: AtomicU64,
+    pub(crate) sctp_out_count: AtomicU64,
     /// When the last input report was handed to the data channel. The next
     /// outgoing packet carries it, so the gap between the two is how long
     /// the report waited for the wire.
@@ -782,6 +836,52 @@ pub(crate) fn observe_presented_age(age_us: u64) {
     METRICS.frame_age_last_us.store(age_us, Ordering::Relaxed);
 }
 
+/// How long the same piece of work took on each of the Vita's two user
+/// CPUs.
+///
+/// The receive path is paid per packet in software, so the core it runs
+/// on decides how much of the bitrate the client can keep up with. The
+/// SDK does not say which core is which, so the client measures it.
+#[derive(Clone, Copy)]
+pub(crate) struct CpuBenchmark {
+    pub(crate) user_0_ns: u64,
+    pub(crate) user_1_ns: u64,
+}
+
+static CPU_BENCHMARK: std::sync::OnceLock<CpuBenchmark> = std::sync::OnceLock::new();
+
+/// Records the result of the startup CPU comparison.
+pub(crate) fn record_cpu_benchmark(benchmark: CpuBenchmark) {
+    let _ = CPU_BENCHMARK.set(benchmark);
+}
+
+/// The measured speed of both user CPUs, in nanoseconds for the same work.
+pub(crate) fn cpu_benchmark_text() -> String {
+    match CPU_BENCHMARK.get() {
+        Some(benchmark) => format!("{}/{}", benchmark.user_0_ns, benchmark.user_1_ns),
+        None => "?/?".to_owned(),
+    }
+}
+
+/// Records how long one part of the pump cycle took.
+pub(crate) fn record_pump_stage(stage: usize, micros: u64) {
+    METRICS.pump_stage_max_us[stage].fetch_max(micros, Ordering::Relaxed);
+    METRICS.pump_stage_sum_us[stage].fetch_add(micros, Ordering::Relaxed);
+    METRICS.pump_stage_count[stage].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Records one receive cycle: how long it took, how many packets it held.
+///
+/// The packet count is kept with the time on purpose. A receive cycle that
+/// takes 60 ms is either slow because each packet is expensive, or because
+/// a burst of a hundred packets came at once - and those two need
+/// different fixes.
+pub(crate) fn record_receive_cycle(micros: u64, packets: u64) {
+    METRICS.rx_packets.fetch_add(packets, Ordering::Relaxed);
+    let packed = (micros.min(1 << 40) << 20) | packets.min(0xF_FFFF);
+    METRICS.recv_cycle_packed.fetch_max(packed, Ordering::Relaxed);
+}
+
 /// Takes the timestamp of the queued input report, if one is waiting.
 pub(crate) fn take_input_queued() -> Option<Instant> {
     METRICS
@@ -838,10 +938,18 @@ pub(crate) static METRICS: VideoMetrics = VideoMetrics {
     audio_offset_us: AtomicI64::new(0),
     audio_drift_us: AtomicI64::new(0),
     audio_delay_drift_us: AtomicI64::new(0),
-    bandwidth_estimate_kbps: AtomicU64::new(0),
     rx_batch_sum: AtomicU64::new(0),
     rx_batch_max: AtomicU64::new(0),
     rx_batch_count: AtomicU64::new(0),
+    pump_max_us: AtomicU64::new(0),
+    pump_stage_max_us: [const { AtomicU64::new(0) }; PUMP_STAGE_COUNT],
+    pump_stage_sum_us: [const { AtomicU64::new(0) }; PUMP_STAGE_COUNT],
+    pump_stage_count: [const { AtomicU64::new(0) }; PUMP_STAGE_COUNT],
+    rx_packets: AtomicU64::new(0),
+    recv_cycle_packed: AtomicU64::new(0),
+    sctp_out_max: AtomicU64::new(0),
+    sctp_out_sum: AtomicU64::new(0),
+    sctp_out_count: AtomicU64::new(0),
     input_queued_at: Mutex::new(None),
     input_wire_sum_us: AtomicU64::new(0),
     input_wire_max_us: AtomicU64::new(0),
@@ -877,6 +985,20 @@ pub(crate) static METRICS: VideoMetrics = VideoMetrics {
     audio_cleared_samples: AtomicU64::new(0),
     audio_holes_ms: AtomicI64::new(0),
 };
+
+/// Formats the per-stage pump timings for the HUD: one value per stage,
+/// in the order the stages run.
+fn format_pump_stages(values: &[u64; PUMP_STAGE_COUNT]) -> String {
+    let mut out = String::with_capacity(PUMP_STAGE_COUNT * 7);
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push('/');
+        }
+        out.push_str(PUMP_STAGE_NAMES[index]);
+        out.push_str(&value.to_string());
+    }
+    out
+}
 
 pub fn video_performance_summary() -> String {
     let rtp_sum = METRICS.rtp_assembly_sum_us.swap(0, Ordering::Relaxed);
@@ -932,11 +1054,59 @@ pub fn video_performance_summary() -> String {
     } else {
         format!("{}/{}", (input_probe_last_us / 1000).min(999), (input_probe_min_us / 1000).min(999))
     };
-    // The receive batch is not on the HUD any more, but the counters are
-    // still reset so that they keep counting per interval.
-    let _ = METRICS.rx_batch_sum.swap(0, Ordering::Relaxed);
-    let _ = METRICS.rx_batch_count.swap(0, Ordering::Relaxed);
-    let _ = METRICS.rx_batch_max.swap(0, Ordering::Relaxed);
+    // Receive batch + pump depth: the two numbers that would show a
+    // burst-sized stall. rx-b is packets drained per receive call;
+    // pump is the worst full pump-cycle duration; sctp-out is the worst
+    // number of outgoing datagrams flushed in one cycle (proxy for an
+    // SCTP pending-queue backlog — the queue depth itself has no public
+    // accessor in the rtc fork).
+    let rx_batch_count = METRICS.rx_batch_count.swap(0, Ordering::Relaxed);
+    let rx_batch_avg = if rx_batch_count == 0 {
+        0
+    } else {
+        METRICS.rx_batch_sum.swap(0, Ordering::Relaxed) / rx_batch_count
+    };
+    if rx_batch_count == 0 {
+        let _ = METRICS.rx_batch_sum.swap(0, Ordering::Relaxed);
+    }
+    let rx_batch_max = METRICS.rx_batch_max.swap(0, Ordering::Relaxed);
+    let pump_max_us = METRICS.pump_max_us.swap(0, Ordering::Relaxed);
+    // Per-stage pump timing: the worst cycle of the window and the
+    // standing average of every cycle in it. The max alone would show a
+    // single slow cycle; the average says whether the cost is a standing
+    // one or a spike.
+    let mut pump_stage_max = [0u64; PUMP_STAGE_COUNT];
+    let mut pump_stage_avg = [0u64; PUMP_STAGE_COUNT];
+    let mut pump_stage_sum = [0u64; PUMP_STAGE_COUNT];
+    for stage in 0..PUMP_STAGE_COUNT {
+        let count = METRICS.pump_stage_count[stage].swap(0, Ordering::Relaxed);
+        let sum = METRICS.pump_stage_sum_us[stage].swap(0, Ordering::Relaxed);
+        pump_stage_max[stage] = METRICS.pump_stage_max_us[stage].swap(0, Ordering::Relaxed);
+        pump_stage_sum[stage] = sum;
+        pump_stage_avg[stage] = if count == 0 { 0 } else { sum / count };
+    }
+    let pump_stages_max = format_pump_stages(&pump_stage_max);
+    let pump_stages_avg = format_pump_stages(&pump_stage_avg);
+    // How many packets came in during the window, and how many came with
+    // the slowest receive cycle. Together with the per-stage timings these
+    // say whether the receive path is expensive per packet or only
+    // expensive when the server sends in bursts.
+    let rx_packets = METRICS.rx_packets.swap(0, Ordering::Relaxed);
+    let recv_packed = METRICS.recv_cycle_packed.swap(0, Ordering::Relaxed);
+    let recv_cycle_us = recv_packed >> 20;
+    let recv_cycle_packets = recv_packed & 0xF_FFFF;
+    // The bitrate this client can actually keep up with, from the receive
+    // cost measured in this window.
+    let sctp_out_count = METRICS.sctp_out_count.swap(0, Ordering::Relaxed);
+    let sctp_out_avg = if sctp_out_count == 0 {
+        0
+    } else {
+        METRICS.sctp_out_sum.swap(0, Ordering::Relaxed) / sctp_out_count
+    };
+    if sctp_out_count == 0 {
+        let _ = METRICS.sctp_out_sum.swap(0, Ordering::Relaxed);
+    }
+    let sctp_out_max = METRICS.sctp_out_max.swap(0, Ordering::Relaxed);
     // How often the input is actually leaving the client, in reports per
     // second. This is the number that says whether the input wire is
     // dropping reports: the controller is polled at 250 Hz, and a
@@ -995,12 +1165,10 @@ pub fn video_performance_summary() -> String {
     // The longest the client held a damaged frame waiting for its missing
     // packets, and the number of times the picture lost ground with the
     // sound in one step.
-    let repair_wait_ms = (METRICS.repair_wait_max_us.load(Ordering::Relaxed) / 1000).min(9_999);
     let av_stalls = METRICS.av_stalls.load(Ordering::Relaxed).min(999);
-    let _ = repair_wait_ms;
     let audio_lost_ms = METRICS.audio_lost_ms.load(Ordering::Relaxed).clamp(-999, 999);
     format!(
-        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{} rmb:{} stut:{av_stalls} a-def:{audio_lost_ms} in-rate:{input_rate}/s in-wire:{input_wire_avg_us}/{input_wire_max_us}us\nhandoff:{} ui-ovr:{} d>h/h>u:{}/{}us h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us a-srv:{audio_offset_ms}ms\nsrv:{server_offset_ms}ms drift:{server_drift_ms}ms av-lag:{av_lag_ms}ms ld:{av_lag_drift_ms}ms av-d:{av_out_ms}ms a-del:{audio_delay_ms}ms holes:{holes_ms}ms pic:{picture_age_ms}ms ip:{input_probe_ms}ms",
+        "fps d/p:{}/{} us r:{rtp_average}/{rtp_max} d/a:{}/{} up/gpu:{}/{} pr/loop:{}/{} skip:{} repl:{} q:{} slot:{} rs:{} rst:{} stut:{av_stalls} a-def:{audio_lost_ms} in-rate:{input_rate}/s in-wire:{input_wire_avg_us}/{input_wire_max_us}us rx-b:{rx_batch_avg}/{rx_batch_max} rxk:{rx_packets}/s pump:{pump_max_us}us bat:{recv_cycle_us}us/{recv_cycle_packets} sctp:{sctp_out_avg}/{sctp_out_max}\nhandoff:{} ui-ovr:{} d>h/h>u:{}/{}us h>u:{}/{}us age:{age_average}/{}us in-lag:{input_lag_average}/{}us kf:{} pres:{} gap:{present_gap_average}/{}us aud:{audio_buffer_average}/{}ms ars:{} flush-gap:{}us a-srv:{audio_offset_ms}ms\nsrv:{server_offset_ms}ms drift:{server_drift_ms}ms av-lag:{av_lag_ms}ms ld:{av_lag_drift_ms}ms av-d:{av_out_ms}ms a-del:{audio_delay_ms}ms holes:{holes_ms}ms pic:{picture_age_ms}ms ip:{input_probe_ms}ms\npmx f/so/hd/e/m/d/c/s:{pump_stages_max} pma:{pump_stages_avg}",
         METRICS.decoded.swap(0, Ordering::Relaxed),
         METRICS.presented.swap(0, Ordering::Relaxed),
         METRICS.decode_us.load(Ordering::Relaxed),
@@ -1015,7 +1183,6 @@ pub fn video_performance_summary() -> String {
         METRICS.slot_dropped.swap(0, Ordering::Relaxed),
         METRICS.resyncs.load(Ordering::Relaxed),
         METRICS.resets.load(Ordering::Relaxed),
-        METRICS.bandwidth_estimate_kbps.load(Ordering::Relaxed),
         METRICS.handoffs.swap(0, Ordering::Relaxed),
         METRICS.ui_overwrites.swap(0, Ordering::Relaxed),
         decode_to_handoff_average,

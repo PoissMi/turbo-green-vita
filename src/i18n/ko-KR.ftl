@@ -23,6 +23,7 @@ settings-rear-touch-enabled = 후면 터치 조작 활성화
 settings-cloud-host = 클라우드 호스트: { $host }
 settings-home-host = 홈 호스트: { $host }
 settings-stream-debug-info = 스트리밍 디버그 정보 표시
+settings-stream-log = 세션 로그를 SD 카드에 기록
 action-back = 뒤로
 
 mode-select-cloud-subtitle = Xbox 클라우드 게이밍으로 플레이
