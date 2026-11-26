@@ -187,7 +187,7 @@ impl Default for Settings {
             locale: Locale::default(),
             max_bitrate: MaxBitrate::default(),
             show_stream_debug_info: false,
-            log_stream: true,
+            log_stream: false,
             game_profiles: HashMap::new(),
         }
     }
