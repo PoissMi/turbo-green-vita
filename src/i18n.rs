@@ -70,7 +70,7 @@ fn format_message(
     if errors.is_empty() {
         Some(value)
     } else {
-        eprintln!("i18n: failed to format {id}: {errors:?}");
+        crate::elog!("i18n: failed to format {id}: {errors:?}");
         None
     }
 }
@@ -119,12 +119,12 @@ fn make_bundle(locale: Locale, source: &'static str) -> Bundle {
         .expect("configured locale codes must be valid BCP-47 language identifiers");
     let resource =
         FluentResource::try_new(source.to_owned()).unwrap_or_else(|(resource, errors)| {
-            eprintln!("i18n: failed to parse {}: {errors:?}", locale.as_str());
+            crate::elog!("i18n: failed to parse {}: {errors:?}", locale.as_str());
             resource
         });
     let mut bundle = FluentBundle::new(vec![langid]);
     if let Err(errors) = bundle.add_resource(resource) {
-        eprintln!(
+        crate::elog!(
             "i18n: failed to add {} resource: {errors:?}",
             locale.as_str()
         );

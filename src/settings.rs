@@ -100,21 +100,27 @@ impl Locale {
 pub enum MaxBitrate {
     #[default]
     Mbps2 = 2,
-    Mbps3 = 3,
-    Mbps4 = 4,
-    Mbps5 = 5,
-    Mbps6 = 6,
-    Mbps8 = 8,
+    Mbps2_5 = 3,
+    Mbps3 = 4,
+    Mbps3_5 = 5,
+    Mbps4 = 6,
+    Mbps4_5 = 7,
+    Mbps5 = 8,
+    Mbps6 = 9,
+    Mbps8 = 10,
     // Legacy settings saved with removed options (15–50 Mbps) deserialize to this variant.
     #[serde(other)]
-    Mbps10 = 10,
+    Mbps10 = 11,
 }
 
 impl MaxBitrate {
-    pub const ALL: [MaxBitrate; 7] = [
+    pub const ALL: [MaxBitrate; 10] = [
         Self::Mbps2,
+        Self::Mbps2_5,
         Self::Mbps3,
+        Self::Mbps3_5,
         Self::Mbps4,
+        Self::Mbps4_5,
         Self::Mbps5,
         Self::Mbps6,
         Self::Mbps8,
@@ -125,8 +131,11 @@ impl MaxBitrate {
     pub fn label(self) -> &'static str {
         match self {
             Self::Mbps2 => "2 Mbps",
+            Self::Mbps2_5 => "2.5 Mbps",
             Self::Mbps3 => "3 Mbps",
+            Self::Mbps3_5 => "3.5 Mbps",
             Self::Mbps4 => "4 Mbps",
+            Self::Mbps4_5 => "4.5 Mbps",
             Self::Mbps5 => "5 Mbps",
             Self::Mbps6 => "6 Mbps",
             Self::Mbps8 => "8 Mbps",
@@ -136,7 +145,21 @@ impl MaxBitrate {
 
     /// Value for the `maxBitrateKbps` capability field.
     pub fn kbps(self) -> u32 {
-        self as u32 * 1000
+        // Discriminants are only identity sentinels for serde; fractional
+        // options can't be expressed as whole-number discriminants, so the
+        // actual rate is spelled out explicitly.
+        match self {
+            Self::Mbps2 => 2000,
+            Self::Mbps2_5 => 2500,
+            Self::Mbps3 => 3000,
+            Self::Mbps3_5 => 3500,
+            Self::Mbps4 => 4000,
+            Self::Mbps4_5 => 4500,
+            Self::Mbps5 => 5000,
+            Self::Mbps6 => 6000,
+            Self::Mbps8 => 8000,
+            Self::Mbps10 => 10000,
+        }
     }
 }
 
@@ -148,6 +171,12 @@ pub struct Settings {
     pub max_bitrate: MaxBitrate,
     /// Shows internal stream/session state on the `Streaming` screen. Off by default.
     pub show_stream_debug_info: bool,
+    /// Master switch for all diagnostic `crate::elog!` logging. Off silences every
+    /// log line; the streaming HUD (`show_stream_debug_info`) is independent
+    /// and keeps working either way. On by default in the persisted
+    /// setting, so a fresh install still reports errors once settings load;
+    /// the gate itself starts off to keep startup silent before that.
+    pub enable_logging: bool,
     pub game_profiles: HashMap<String, GameProfile>,
 }
 
@@ -178,12 +207,19 @@ impl Default for Settings {
             locale: Locale::default(),
             max_bitrate: MaxBitrate::default(),
             show_stream_debug_info: false,
+            enable_logging: true,
             game_profiles: HashMap::new(),
         }
     }
 }
 
 impl Settings {
+    /// Turns the global [`crate::logging`] gate to match this setting.
+    /// Called on load and whenever the user toggles it in the Settings screen.
+    pub fn apply_logging(&self) {
+        crate::logging::set_enabled(self.enable_logging);
+    }
+
     pub fn game_profile(&self, title_id: &str) -> Option<&GameProfile> {
         self.game_profiles.get(title_id)
     }
@@ -214,14 +250,14 @@ impl Settings {
         let data = match std::fs::read_to_string(SETTINGS_PATH) {
             Ok(data) => data,
             Err(error) => {
-                eprintln!("Settings: no existing {SETTINGS_PATH} ({error}), using defaults");
+                crate::elog!("Settings: no existing {SETTINGS_PATH} ({error}), using defaults");
                 return Self::default();
             }
         };
         match serde_json::from_str(&data) {
             Ok(settings) => settings,
             Err(error) => {
-                eprintln!("Settings: failed to parse {SETTINGS_PATH} ({error}), using defaults");
+                crate::elog!("Settings: failed to parse {SETTINGS_PATH} ({error}), using defaults");
                 Self::default()
             }
         }
@@ -237,7 +273,7 @@ impl Settings {
             .and_then(|data| crate::fs_utils::write_file_truncating(SETTINGS_PATH, data));
 
         if let Err(error) = result {
-            eprintln!("Settings: failed to save: {error:#}");
+            crate::elog!("Settings: failed to save: {error:#}");
         }
     }
 }

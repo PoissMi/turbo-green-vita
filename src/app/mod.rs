@@ -40,6 +40,7 @@ pub struct App {
 impl App {
     pub fn new() -> Result<Self> {
         let settings = Settings::load();
+        settings.apply_logging();
         let service = Service::new(settings.locale.as_str());
 
         Ok(Self {
@@ -61,9 +62,9 @@ impl App {
     fn set_error_screen(&mut self, reason: impl Into<String>, details: impl Into<String>) {
         let reason = reason.into();
         let details = details.into();
-        eprintln!("ERROR: {reason}");
+        crate::elog!("ERROR: {reason}");
         if !details.is_empty() {
-            eprintln!("{details}");
+            crate::elog!("{details}");
         }
         self.set_state(AppState::Error {
             reason,

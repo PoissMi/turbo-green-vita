@@ -130,7 +130,7 @@ impl XboxStreamingBackend {
     pub(crate) async fn stop(self) -> Result<()> {
         let session_id = self.stream.session_id.clone();
         let response = self.stream.stop().await?;
-        eprintln!("Stopped xCloud session {session_id}: {response}");
+        crate::elog!("Stopped xCloud session {session_id}: {response}");
         Ok(())
     }
 
@@ -143,7 +143,7 @@ impl XboxStreamingBackend {
                 }
                 PollJob::Done(Ok(())) => {}
                 PollJob::Done(Err(error)) => {
-                    eprintln!("Failed to post local ICE candidates: {error:#}");
+                    crate::elog!("Failed to post local ICE candidates: {error:#}");
                 }
             }
         }
@@ -157,7 +157,7 @@ impl XboxStreamingBackend {
         let count = candidates.len();
         self.ice_post_job = Some(tokio::spawn(async move {
             stream.post_ice_candidates(candidates).await?;
-            eprintln!("Posted {count} local ICE candidate(s) to xCloud");
+            crate::elog!("Posted {count} local ICE candidate(s) to xCloud");
             Ok(())
         }));
     }
@@ -168,7 +168,7 @@ impl XboxStreamingBackend {
                 PollJob::Pending(job) => self.ice_poll_job = Some(job),
                 PollJob::Done(result) => {
                     let response = result.unwrap_or_else(|error| {
-                        eprintln!("Failed to poll remote ICE candidates: {error:#}");
+                        crate::elog!("Failed to poll remote ICE candidates: {error:#}");
                         None
                     });
                     for candidate in response.into_iter().flatten() {
@@ -212,7 +212,7 @@ impl XboxStreamingBackend {
                     }
                 }
                 PollJob::Done(Err(error)) => {
-                    eprintln!("Failed to send xCloud keepalive: {error:#}");
+                    crate::elog!("Failed to send xCloud keepalive: {error:#}");
                 }
             }
         }

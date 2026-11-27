@@ -23,6 +23,7 @@ settings-rear-touch-enabled = Enable rear touch controls
 settings-cloud-host = Cloud host: { $host }
 settings-home-host = Home host: { $host }
 settings-stream-debug-info = Show streaming debug info
+settings-enable-logging = Enable diagnostic logging
 action-back = Back
 
 mode-select-cloud-subtitle = Stream Xbox Cloud Gaming titles

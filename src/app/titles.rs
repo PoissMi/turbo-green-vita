@@ -260,7 +260,7 @@ impl App {
 
     pub(super) fn invalidate_catalog_for_locale_change(&mut self) {
         if let Err(error) = clear_catalog_cache() {
-            eprintln!("Title cache: failed to clear after locale change: {error:#}");
+            crate::elog!("Title cache: failed to clear after locale change: {error:#}");
         }
         for title in &mut self.service.titles {
             title.details = None;

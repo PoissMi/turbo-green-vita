@@ -18,6 +18,7 @@ pub enum Command {
     SetRearTouchEnabled { title_id: String, enabled: bool },
     SetFrontTouchAuxiliaryButtons { title_id: String, enabled: bool },
     SetShowStreamDebugInfo(bool),
+    SetEnableLogging(bool),
 }
 
 #[derive(Clone)]
@@ -30,6 +31,7 @@ enum SettingsRow {
     GameRearTouch { title_id: String, enabled: bool },
     GameFrontTouchAuxiliary { title_id: String, enabled: bool },
     StreamDebug(bool),
+    LoggingEnabled(bool),
     Back,
 }
 
@@ -83,6 +85,7 @@ fn settings_rows(app: &App) -> Vec<SettingsRow> {
     rows.push(SettingsRow::StreamDebug(
         app.settings.show_stream_debug_info,
     ));
+    rows.push(SettingsRow::LoggingEnabled(app.settings.enable_logging));
     rows.push(SettingsRow::Back);
     rows
 }
@@ -283,6 +286,18 @@ pub(crate) fn show(ctx: &egui::Context, app: &App, commands: &mut Vec<AppCommand
 
                 ui.add_space(14.0);
                 ui.separator();
+                if checkbox_row(
+                    ui,
+                    selected_index == row_index,
+                    app.settings.enable_logging,
+                    i18n.text("settings-enable-logging"),
+                ) {
+                    commands.push(Command::SetEnableLogging(!app.settings.enable_logging).into());
+                }
+                row_index += 1;
+
+                ui.add_space(14.0);
+                ui.separator();
                 if focus_row(ui, selected_index == row_index, i18n.text("action-back")) {
                     commands.push(InputCommand::Back.into());
                 }
@@ -450,6 +465,9 @@ impl App {
             SettingsRow::StreamDebug(enabled) => {
                 return self.handle_settings_command(Command::SetShowStreamDebugInfo(!enabled));
             }
+            SettingsRow::LoggingEnabled(enabled) => {
+                return self.handle_settings_command(Command::SetEnableLogging(!enabled));
+            }
             SettingsRow::Back => {}
         }
 
@@ -559,6 +577,11 @@ impl App {
             }
             Command::SetShowStreamDebugInfo(enabled) => {
                 self.settings.show_stream_debug_info = enabled;
+                self.settings.save();
+            }
+            Command::SetEnableLogging(enabled) => {
+                self.settings.enable_logging = enabled;
+                self.settings.apply_logging();
                 self.settings.save();
             }
         }

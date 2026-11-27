@@ -131,7 +131,7 @@ impl VideoReceiver {
                     }
                 }
                 Err(error) => {
-                    eprintln!("Failed to decode H264 video frame: {error}");
+                    crate::elog!("Failed to decode H264 video frame: {error}");
                     decode_errors = decode_errors.saturating_add(1);
                     *keyframe_requested = true;
                 }

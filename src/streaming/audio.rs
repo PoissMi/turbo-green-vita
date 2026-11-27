@@ -189,7 +189,7 @@ impl AudioRenderer {
             .context("failed to open SDL audio queue")?;
         let spec = queue.spec();
         if spec.freq != AUDIO_SAMPLE_RATE || spec.channels != AUDIO_CHANNELS as u8 {
-            eprintln!(
+            crate::elog!(
                 "SDL audio opened as {} Hz / {} channel(s), requested {} Hz / {} channel(s)",
                 spec.freq, spec.channels, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS
             );
@@ -241,7 +241,7 @@ impl AudioRenderer {
                     break;
                 }
                 Err(TrySendError::Disconnected(packet)) => {
-                    eprintln!("Audio decode worker stopped; restarting");
+                    crate::elog!("Audio decode worker stopped; restarting");
                     self.restart_decode_worker();
                     let _ = self.packets_tx.try_send(packet);
                 }
@@ -270,7 +270,7 @@ impl AudioRenderer {
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    eprintln!("Audio decode worker output disconnected; restarting");
+                    crate::elog!("Audio decode worker output disconnected; restarting");
                     self.restart_decode_worker();
                     break;
                 }
@@ -298,7 +298,7 @@ impl AudioRenderer {
                 break;
             }
             if let Err(error) = self.queue.queue_audio(&samples) {
-                eprintln!("Failed to queue SDL audio: {error}");
+                crate::elog!("Failed to queue SDL audio: {error}");
             } else {
                 // The audio that reached the device. The difference between
                 // this and what was decoded is the audio still waiting for
@@ -407,7 +407,7 @@ impl AudioRenderer {
                 self.packets_tx = packets_tx;
                 self.samples_rx = samples_rx;
             }
-            Err(error) => eprintln!("Failed to restart audio decode worker: {error:#}"),
+            Err(error) => crate::elog!("Failed to restart audio decode worker: {error:#}"),
         }
     }
 }
@@ -426,7 +426,7 @@ fn spawn_decode_worker() -> Result<(SyncSender<Bytes>, Receiver<Vec<i16>>)> {
                 let samples_per_channel = match decoder.decode(&packet, &mut decode_buf) {
                     Ok(samples_per_channel) => samples_per_channel,
                     Err(error) => {
-                        eprintln!("Failed to decode Opus audio packet: {error}");
+                        crate::elog!("Failed to decode Opus audio packet: {error}");
                         continue;
                     }
                 };

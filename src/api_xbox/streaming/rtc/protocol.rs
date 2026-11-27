@@ -109,7 +109,7 @@ impl XboxRtcProtocol {
             data,
         );
         if let Some(size) = channel::parse_server_video_size(&channel_ids, channel_id, data) {
-            eprintln!("xCloud reported server video size: {size:?}");
+            crate::elog!("xCloud reported server video size: {size:?}");
             self.server_video_size = Some(size);
         }
     }
