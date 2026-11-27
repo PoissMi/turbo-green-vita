@@ -1,5 +1,6 @@
 //! User-editable settings, persisted to `ux0:data/xcloud-rust/settings.json` on each change.
 
+use crate::logging::log_line;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -105,19 +106,25 @@ pub enum MaxBitrate {
     Mbps5 = 5,
     Mbps6 = 6,
     Mbps8 = 8,
+    Mbps2500 = 2500,
+    Mbps3500 = 3500,
+    Mbps4500 = 4500,
     // Legacy settings saved with removed options (15–50 Mbps) deserialize to this variant.
     #[serde(other)]
     Mbps10 = 10,
 }
 
 impl MaxBitrate {
-    pub const ALL: [MaxBitrate; 7] = [
+    pub const ALL: [MaxBitrate; 10] = [
         Self::Mbps2,
         Self::Mbps3,
         Self::Mbps4,
         Self::Mbps5,
         Self::Mbps6,
         Self::Mbps8,
+        Self::Mbps2500,
+        Self::Mbps3500,
+        Self::Mbps4500,
         Self::Mbps10,
     ];
 
@@ -130,13 +137,22 @@ impl MaxBitrate {
             Self::Mbps5 => "5 Mbps",
             Self::Mbps6 => "6 Mbps",
             Self::Mbps8 => "8 Mbps",
+            Self::Mbps2500 => "2500 Mbps",
+            Self::Mbps3500 => "3500 Mbps",
+            Self::Mbps4500 => "4500 Mbps",
             Self::Mbps10 => "10 Mbps",
         }
     }
 
-    /// Value for the `maxBitrateKbps` capability field.
+    /// Value for the `maxBitrateKbps` capability field. The half-step tiers
+    /// store their exact kbps value, so they are not rounded by the label.
     pub fn kbps(self) -> u32 {
-        self as u32 * 1000
+        match self {
+            Self::Mbps2500 => 2500,
+            Self::Mbps3500 => 3500,
+            Self::Mbps4500 => 4500,
+            other => other as u32 * 1000,
+        }
     }
 }
 
@@ -149,6 +165,8 @@ pub struct Settings {
     /// Shows internal stream/session state on the `Streaming` screen. Off by default.
     pub show_stream_debug_info: bool,
     pub game_profiles: HashMap<String, GameProfile>,
+    /// Enables console diagnostics output. The debug HUD is not affected.
+    pub logging_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +197,7 @@ impl Default for Settings {
             max_bitrate: MaxBitrate::default(),
             show_stream_debug_info: false,
             game_profiles: HashMap::new(),
+            logging_enabled: false,
         }
     }
 }
@@ -214,14 +233,14 @@ impl Settings {
         let data = match std::fs::read_to_string(SETTINGS_PATH) {
             Ok(data) => data,
             Err(error) => {
-                eprintln!("Settings: no existing {SETTINGS_PATH} ({error}), using defaults");
+                log_line!("Settings: no existing {SETTINGS_PATH} ({error}), using defaults");
                 return Self::default();
             }
         };
         match serde_json::from_str(&data) {
             Ok(settings) => settings,
             Err(error) => {
-                eprintln!("Settings: failed to parse {SETTINGS_PATH} ({error}), using defaults");
+                log_line!("Settings: failed to parse {SETTINGS_PATH} ({error}), using defaults");
                 Self::default()
             }
         }
@@ -237,7 +256,7 @@ impl Settings {
             .and_then(|data| crate::fs_utils::write_file_truncating(SETTINGS_PATH, data));
 
         if let Err(error) = result {
-            eprintln!("Settings: failed to save: {error:#}");
+            log_line!("Settings: failed to save: {error:#}");
         }
     }
 }

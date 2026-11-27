@@ -1,3 +1,4 @@
+use crate::logging::log_line;
 use crate::api::streaming::rtc::media::{AudioReceiver, VideoReceiver};
 use crate::api::streaming::rtc::transport::RtcTransport;
 use crate::streaming::input::{GamepadFrame, PointerEvent};
@@ -178,7 +179,7 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             let _ = self.peer.handle_timeout(now);
         }
         if self.initial_video_keyframe_due(now) {
-            eprintln!("No initial video RTP after WebRTC connected; requesting a keyframe");
+            log_line!("No initial video RTP after WebRTC connected; requesting a keyframe");
             keyframe_requested = true;
         }
         self.request_keyframe(keyframe_requested, now);
@@ -201,7 +202,7 @@ impl<B: RtcSessionBackend> RtcSession<B> {
                 "cap:{}kbps fps:{} {server} {status}",
                 self.max_video_bitrate_kbps, REQUESTED_VIDEO_FPS
             );
-            eprintln!("{}", self.status);
+            log_line!("{}", self.status);
         }
 
         Ok(gathered_candidates)
@@ -315,7 +316,7 @@ impl<B: RtcSessionBackend> RtcSession<B> {
                     }
                 }
                 RTCPeerConnectionEvent::OnIceCandidateErrorEvent(error) => {
-                    eprintln!(
+                    log_line!(
                         "ICE candidate error from {} ({}:{}): {} {}",
                         error.url, error.address, error.port, error.error_code, error.error_text
                     );

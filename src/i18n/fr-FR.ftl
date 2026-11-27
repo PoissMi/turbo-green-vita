@@ -22,6 +22,7 @@ settings-front-touch-auxiliary-buttons = Utiliser l'écran tactile avant pour L2
 settings-rear-touch-enabled = Activer les commandes tactiles arrière
 settings-cloud-host = Hôte cloud : { $host }
 settings-home-host = Hôte local : { $host }
+settings-stream-log = Activer l'enregistrement des diagnostics de streaming
 settings-stream-debug-info = Afficher les infos de débogage du streaming
 action-back = Retour
 

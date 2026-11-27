@@ -1,4 +1,5 @@
 //! PS Vita hardware H.264 decoder (`sceVideodec`/`sceAvcdec`).
+use crate::logging::log_line;
 use super::memory::DecoderFrameBuffer;
 use super::{DecoderConfig, YuvLayout};
 use anyhow::{Result, bail};
@@ -32,7 +33,7 @@ impl AvcdecLibrary {
             if ret >= 0 {
                 true
             } else if ret as u32 == SCE_SYSMODULE_ERROR_INVALID_VALUE {
-                eprintln!(
+                log_line!(
                     "sceSysmoduleLoadModule(SCE_SYSMODULE_AVCDEC=0x{SCE_SYSMODULE_AVCDEC:x}) returned {ret:#x}; continuing with SceVideodec imports; is_loaded_before={loaded_before:#x}",
                 );
                 false
@@ -48,7 +49,7 @@ impl AvcdecLibrary {
         let low_delay_ret =
             unsafe { sceAvcdecSetLowDelayModeNongameapp(SCE_VIDEODEC_TYPE_HW_AVCDEC, SCE_AVCDEC_DELAY_MODE_LOW) };
         if low_delay_ret < 0 {
-            eprintln!("sceAvcdecSetLowDelayModeNongameapp failed: {low_delay_ret:#x}; continuing");
+            log_line!("sceAvcdecSetLowDelayModeNongameapp failed: {low_delay_ret:#x}; continuing");
         }
 
         let init_info = SceVideodecQueryInitInfoHwAvcdec {

@@ -1,3 +1,4 @@
+use crate::logging::log_line;
 use anyhow::{Context, Result};
 
 const CATALOG_CACHE_DIR: &str = "ux0:data/green-vita/cache/catalog-v1";
@@ -25,7 +26,7 @@ pub(super) fn read(path: &str) -> Option<Vec<u8>> {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
-            eprintln!("Catalog cache: failed to read {path}: {error}");
+            log_line!("Catalog cache: failed to read {path}: {error}");
             None
         }
     }

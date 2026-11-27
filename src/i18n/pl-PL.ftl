@@ -22,6 +22,7 @@ settings-front-touch-auxiliary-buttons = Użyj przedniego ekranu dla L2/R2/L3/R3
 settings-rear-touch-enabled = Włącz sterowanie tylnym panelem dotykowym
 settings-cloud-host = Host chmury: { $host }
 settings-home-host = Host domowy: { $host }
+settings-stream-log = Włącz zapis diagnostyki strumieniowania
 settings-stream-debug-info = Pokaż informacje debugowania strumieniowania
 action-back = Wstecz
 

@@ -22,6 +22,7 @@ settings-front-touch-auxiliary-buttons = Ön dokunmatiği fare yerine L2/R2/L3/R
 settings-rear-touch-enabled = Arka dokunmatik kontrollerini etkinleştir
 settings-cloud-host = Bulut ana makinesi: { $host }
 settings-home-host = Ev ana makinesi: { $host }
+settings-stream-log = Akış tanılama günlüğünü etkinleştir
 settings-stream-debug-info = Akış hata ayıklama bilgilerini göster
 action-back = Geri
 

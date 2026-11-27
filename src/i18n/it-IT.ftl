@@ -22,6 +22,7 @@ settings-front-touch-auxiliary-buttons = Usa il touch anteriore per L2/R2/L3/R3 
 settings-rear-touch-enabled = Attiva i controlli touch posteriori
 settings-cloud-host = Host cloud: { $host }
 settings-home-host = Host locale: { $host }
+settings-stream-log = Abilita il registro delle diagnostiche di streaming
 settings-stream-debug-info = Mostra informazioni di debug dello streaming
 action-back = Indietro
 

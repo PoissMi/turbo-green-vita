@@ -13,6 +13,7 @@ pub use image::TitleImage;
 pub(crate) use state::AppState;
 pub(crate) use stream_session::{StreamStartTarget, StreamingSession, describe_stream_state};
 
+use crate::logging::log_line;
 use self::service::Service;
 use self::ui::header::MenuState;
 use crate::i18n::{I18n, arg_string};
@@ -40,6 +41,7 @@ pub struct App {
 impl App {
     pub fn new() -> Result<Self> {
         let settings = Settings::load();
+        crate::logging::set_enabled(settings.logging_enabled);
         let service = Service::new(settings.locale.as_str());
 
         Ok(Self {
@@ -61,9 +63,9 @@ impl App {
     fn set_error_screen(&mut self, reason: impl Into<String>, details: impl Into<String>) {
         let reason = reason.into();
         let details = details.into();
-        eprintln!("ERROR: {reason}");
+        log_line!("ERROR: {reason}");
         if !details.is_empty() {
-            eprintln!("{details}");
+            log_line!("{details}");
         }
         self.set_state(AppState::Error {
             reason,

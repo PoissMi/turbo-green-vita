@@ -1,3 +1,4 @@
+use crate::logging::log_line;
 use super::{Game, GameDetails, cache};
 use crate::api_xbox::api::ApiClient;
 use crate::api_xbox::game_catalog;
@@ -30,13 +31,13 @@ impl GameCatalogBackend {
         match result {
             Ok(games) => {
                 if let Err(error) = save_cached_games(self.cache_namespace(), &games) {
-                    eprintln!("Game catalog: failed to cache game list: {error:#}");
+                    log_line!("Game catalog: failed to cache game list: {error:#}");
                 }
                 Ok(games)
             }
             Err(error) => match load_cached_games(self.cache_namespace()) {
                 Some(games) => {
-                    eprintln!(
+                    log_line!(
                         "Game catalog: using cached game list after request failed: {error:#}"
                     );
                     Ok(games)
@@ -67,7 +68,7 @@ fn load_cached_games(namespace: &str) -> Option<Vec<Game>> {
     match serde_json::from_slice(&bytes) {
         Ok(games) => Some(games),
         Err(error) => {
-            eprintln!("Game catalog: invalid cached game list: {error}");
+            log_line!("Game catalog: invalid cached game list: {error}");
             let _ = std::fs::remove_file(path);
             None
         }

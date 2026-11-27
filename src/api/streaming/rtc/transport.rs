@@ -1,3 +1,4 @@
+use crate::logging::log_line;
 use super::ice;
 use anyhow::{Context, Result};
 use bytes::BytesMut;
@@ -39,11 +40,11 @@ impl RtcTransport {
                 if let Err(error) =
                     ice::add_srflx_candidate(peer, public_addr, local_addr, stun_server)
                 {
-                    eprintln!("Failed to add server-reflexive ICE candidate: {error:#}");
+                    log_line!("Failed to add server-reflexive ICE candidate: {error:#}");
                 }
             }
-            Ok(None) => eprintln!("STUN request produced no usable response"),
-            Err(error) => eprintln!("STUN discovery failed: {error:#}"),
+            Ok(None) => log_line!("STUN request produced no usable response"),
+            Err(error) => log_line!("STUN discovery failed: {error:#}"),
         }
 
         ice::local_candidate(peer, String::new(), None)
@@ -80,7 +81,7 @@ impl RtcTransport {
                 .send_to(&outgoing.message, outgoing.transport.peer_addr)
                 .await
             {
-                eprintln!(
+                log_line!(
                     "Failed to send WebRTC UDP packet to {}: {error}",
                     outgoing.transport.peer_addr
                 );
@@ -113,12 +114,12 @@ impl RtcTransport {
                         },
                         message: BytesMut::from(&self.recv_buf[..n]),
                     }) {
-                        eprintln!("Failed to handle WebRTC UDP packet from {peer_addr}: {error}");
+                        log_line!("Failed to handle WebRTC UDP packet from {peer_addr}: {error}");
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(error) => {
-                    eprintln!("Failed to receive WebRTC UDP packet: {error}");
+                    log_line!("Failed to receive WebRTC UDP packet: {error}");
                     break;
                 }
             }

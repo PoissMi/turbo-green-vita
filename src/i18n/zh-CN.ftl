@@ -22,6 +22,7 @@ settings-front-touch-auxiliary-buttons = 将前触屏用于 L2/R2/L3/R3，而非
 settings-rear-touch-enabled = 启用背面触控操作
 settings-cloud-host = 云端主机: { $host }
 settings-home-host = 本地主机: { $host }
+settings-stream-log = 启用串流诊断日志记录
 settings-stream-debug-info = 显示串流调试信息
 action-back = 返回
 

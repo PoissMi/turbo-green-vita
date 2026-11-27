@@ -1,3 +1,4 @@
+use crate::logging::log_line;
 use super::state::CredentialsLoadResult;
 use super::stream_session::cleanup_active_sessions;
 use super::{App, AppState, PollJob, poll_job};
@@ -26,7 +27,7 @@ impl App {
             let profile = match auth.fetch_xbox_profile().await {
                 Ok(profile) => Some(profile),
                 Err(error) => {
-                    eprintln!("Failed to fetch Xbox profile (avatar/gamertag): {error:#}");
+                    log_line!("Failed to fetch Xbox profile (avatar/gamertag): {error:#}");
                     None
                 }
             };
@@ -110,7 +111,7 @@ impl App {
                 self.load_credentials();
             }
             PollJob::Done(Err(error)) => {
-                eprintln!("Sign-in check failed: {error:#}");
+                log_line!("Sign-in check failed: {error:#}");
                 self.request_device_code();
             }
         }
@@ -136,7 +137,7 @@ impl App {
                     Ok(DeviceCodePoll::Pending(next_retry)) => retry_after = next_retry,
                     Ok(DeviceCodePoll::Restart) => anyhow::bail!("device code expired"),
                     Err(error) => {
-                        eprintln!("Sign-in poll failed, retrying: {error:#}");
+                        log_line!("Sign-in poll failed, retrying: {error:#}");
                         retry_after = device_code.poll_interval;
                     }
                 }
@@ -175,7 +176,7 @@ impl App {
                 });
                 // No mode picker: straight into Cloud titles.
                 self.choose_stream_kind(StreamKind::Cloud).unwrap_or_else(|_| {
-                    eprintln!("failed to enter Cloud title list");
+                    log_line!("failed to enter Cloud title list");
                 });
             }
             PollJob::Done(Ok(CredentialsLoadResult {
@@ -183,11 +184,11 @@ impl App {
                 auth,
             })) => {
                 self.service.auth = auth;
-                eprintln!("Xbox sign-in failed: {error:#}");
+                log_line!("Xbox sign-in failed: {error:#}");
                 self.set_sign_in_error_screen(format!("{error:#}"));
             }
             PollJob::Done(Err(error)) => {
-                eprintln!("Xbox sign-in task failed: {error:#}");
+                log_line!("Xbox sign-in task failed: {error:#}");
                 self.set_sign_in_error_screen(format!("{error:#}"));
             }
         }

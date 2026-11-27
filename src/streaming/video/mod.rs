@@ -8,6 +8,7 @@ pub const STREAM_HEIGHT: u32 = 720;
 pub use metrics::video_performance_summary;
 pub use worker::VideoDecodeWorker;
 
+use crate::logging::log_line;
 use anyhow::{Result, ensure};
 use memory::DecoderBlock;
 use std::sync::{Mutex, atomic::AtomicBool};
@@ -63,12 +64,12 @@ pub(crate) fn reserve_yuv_output() -> Result<()> {
                 if index < STAGING_SLOT_MIN {
                     return Err(error);
                 }
-                eprintln!("Only {index} staging slots could be allocated; continuing with {index}");
+                log_line!("Only {index} staging slots could be allocated; continuing with {index}");
                 break;
             }
         }
     }
-    eprintln!("Allocated {} NV12 staging slots", slots.len());
+    log_line!("Allocated {} NV12 staging slots", slots.len());
     *IDLE_OUTPUT_SLOTS.lock().unwrap() = Some(slots);
     Ok(())
 }

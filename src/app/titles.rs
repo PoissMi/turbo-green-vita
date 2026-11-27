@@ -1,3 +1,4 @@
+use crate::logging::log_line;
 use super::image::{TitleImage, mask_to_circle};
 use super::{App, AppState};
 use crate::api::catalog::worker::{CatalogResult, ImageKind, clear_catalog_cache};
@@ -260,7 +261,7 @@ impl App {
 
     pub(super) fn invalidate_catalog_for_locale_change(&mut self) {
         if let Err(error) = clear_catalog_cache() {
-            eprintln!("Title cache: failed to clear after locale change: {error:#}");
+            log_line!("Title cache: failed to clear after locale change: {error:#}");
         }
         for title in &mut self.service.titles {
             title.details = None;

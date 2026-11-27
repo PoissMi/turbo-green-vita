@@ -22,6 +22,7 @@ settings-front-touch-auxiliary-buttons = 전면 터치를 마우스 대신 L2/R2
 settings-rear-touch-enabled = 후면 터치 조작 활성화
 settings-cloud-host = 클라우드 호스트: { $host }
 settings-home-host = 홈 호스트: { $host }
+settings-stream-log = 스트리밍 진단 로깅 활성화
 settings-stream-debug-info = 스트리밍 디버그 정보 표시
 action-back = 뒤로
 

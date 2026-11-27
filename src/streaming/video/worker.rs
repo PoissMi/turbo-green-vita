@@ -1,3 +1,4 @@
+use crate::logging::log_line;
 use super::decoder::HwVideoDecoder;
 use super::metrics;
 use super::{DecodedFrame, DecoderConfig, DirectVideoOutput};
@@ -152,7 +153,7 @@ fn pin_decoder_thread() {
         )
     };
     if result < 0 {
-        eprintln!("Failed to pin video decoder thread to user CPU 2: {result:#x}");
+        log_line!("Failed to pin video decoder thread to user CPU 2: {result:#x}");
     }
     // Decode is the latency-critical producer: raise it above the UI/egui
     // thread (which has no priority bump) so 5.7ms decodes don't queue
@@ -164,7 +165,7 @@ fn pin_decoder_thread() {
         )
     };
     if result < 0 {
-        eprintln!("Failed to raise video decoder thread priority: {result}");
+        log_line!("Failed to raise video decoder thread priority: {result}");
     }
 }
 
@@ -280,7 +281,7 @@ fn decode_queued_access_unit(
             publish_result(latest_result, result_ready, Err(error.to_string()));
         }
         Err(_) => {
-            eprintln!("H264 decoder panicked; recreating decoder on next frame");
+            log_line!("H264 decoder panicked; recreating decoder on next frame");
             *decoder = None;
             publish_result(
                 latest_result,

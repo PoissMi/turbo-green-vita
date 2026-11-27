@@ -1,3 +1,4 @@
+use crate::logging::log_line;
 use crate::api::streaming::rtc::session::{RtcSession, RtcSessionConfig};
 use crate::streaming::input::{GamepadFrame, PointerEvent};
 use crate::streaming::video::{DecodedFrame, DirectVideoOutput};
@@ -228,7 +229,7 @@ fn prioritize_rtc_thread() {
         )
     };
     if affinity_result < 0 {
-        eprintln!("Failed to pin RTC thread to user CPU 1: {affinity_result:#x}");
+        log_line!("Failed to pin RTC thread to user CPU 1: {affinity_result:#x}");
     }
 
     let result = unsafe {
@@ -237,7 +238,7 @@ fn prioritize_rtc_thread() {
         )
     };
     if result < 0 {
-        eprintln!("Failed to maximize RTC thread priority: {result}");
+        log_line!("Failed to maximize RTC thread priority: {result}");
     }
 }
 
@@ -317,7 +318,7 @@ async fn run_session<B: super::session::RtcSessionBackend>(
                 consecutive_pump_errors = consecutive_pump_errors.saturating_add(1);
                 session.status =
                     format!("WebRTC pump error; retrying ({consecutive_pump_errors}): {error:#}");
-                eprintln!("{}", session.status);
+                log_line!("{}", session.status);
                 send_lossy(
                     &events_tx,
                     RtcWorkerEvent::Status {
@@ -461,7 +462,7 @@ fn drain_commands<B: super::session::RtcSessionBackend>(
         match commands_rx.try_recv() {
             Ok(RtcWorkerCommand::AddRemoteCandidate(candidate)) => {
                 if let Err(error) = session.add_remote_candidate(candidate) {
-                    eprintln!("Failed to add remote ICE candidate: {error:#}");
+                    log_line!("Failed to add remote ICE candidate: {error:#}");
                 }
             }
             Ok(RtcWorkerCommand::SendPointerEvent(event)) => {

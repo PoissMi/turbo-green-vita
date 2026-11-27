@@ -22,6 +22,7 @@ settings-front-touch-auxiliary-buttons = Gebruik het voorste touchscreen voor L2
 settings-rear-touch-enabled = Bediening via achtertouchpad inschakelen
 settings-cloud-host = Cloudhost: { $host }
 settings-home-host = Thuishost: { $host }
+settings-stream-log = Streamingdiagnoselogging inschakelen
 settings-stream-debug-info = Streaming-foutopsporingsinfo weergeven
 action-back = Terug
 

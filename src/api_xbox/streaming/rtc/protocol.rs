@@ -1,3 +1,4 @@
+use crate::logging::log_line;
 use crate::api::streaming::rtc::session::RtcSessionBackend;
 use crate::api_xbox::streaming::control::channel::{self, HandshakeStage};
 use crate::api_xbox::streaming::control::input::{InputQueue, PointerFrame};
@@ -109,7 +110,7 @@ impl XboxRtcProtocol {
             data,
         );
         if let Some(size) = channel::parse_server_video_size(&channel_ids, channel_id, data) {
-            eprintln!("xCloud reported server video size: {size:?}");
+            log_line!("xCloud reported server video size: {size:?}");
             self.server_video_size = Some(size);
         }
     }

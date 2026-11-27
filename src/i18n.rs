@@ -1,5 +1,6 @@
 //! Fluent-based UI translations, one `.ftl` file per [`Locale`] under `src/i18n/`.
 
+use crate::logging::log_line;
 use crate::{AppState, Locale};
 use fluent_bundle::{FluentArgs, FluentBundle, FluentResource, FluentValue};
 use std::cell::RefCell;
@@ -70,7 +71,7 @@ fn format_message(
     if errors.is_empty() {
         Some(value)
     } else {
-        eprintln!("i18n: failed to format {id}: {errors:?}");
+        log_line!("i18n: failed to format {id}: {errors:?}");
         None
     }
 }
@@ -119,12 +120,12 @@ fn make_bundle(locale: Locale, source: &'static str) -> Bundle {
         .expect("configured locale codes must be valid BCP-47 language identifiers");
     let resource =
         FluentResource::try_new(source.to_owned()).unwrap_or_else(|(resource, errors)| {
-            eprintln!("i18n: failed to parse {}: {errors:?}", locale.as_str());
+            log_line!("i18n: failed to parse {}: {errors:?}", locale.as_str());
             resource
         });
     let mut bundle = FluentBundle::new(vec![langid]);
     if let Err(errors) = bundle.add_resource(resource) {
-        eprintln!(
+        log_line!(
             "i18n: failed to add {} resource: {errors:?}",
             locale.as_str()
         );

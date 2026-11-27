@@ -1,3 +1,4 @@
+use crate::logging::log_line;
 use crate::app::AppState;
 use crate::app::ui::header::show_header_row;
 use crate::app::ui::theme::Theme;
@@ -75,13 +76,13 @@ impl App {
                     AppState::Connecting { session, .. } => {
                         let return_to = return_screen(session.kind, session.return_selected);
                         let session_id = session.stream.session_id.clone();
-                        eprintln!("Cancelling connecting session {session_id}...");
+                        log_line!("Cancelling connecting session {session_id}...");
                         match session.stream.stop().await {
                             Ok(response) => {
-                                eprintln!("Cancelled session {session_id}: {response}");
+                                log_line!("Cancelled session {session_id}: {response}");
                             }
                             Err(error) => {
-                                eprintln!("Failed to cancel session {session_id}: {error:#}");
+                                log_line!("Failed to cancel session {session_id}: {error:#}");
                             }
                         }
                         self.set_state(return_to);

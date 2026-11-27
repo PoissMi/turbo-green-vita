@@ -18,6 +18,7 @@ pub enum Command {
     SetRearTouchEnabled { title_id: String, enabled: bool },
     SetFrontTouchAuxiliaryButtons { title_id: String, enabled: bool },
     SetShowStreamDebugInfo(bool),
+    SetLoggingEnabled(bool),
 }
 
 #[derive(Clone)]
@@ -30,6 +31,7 @@ enum SettingsRow {
     GameRearTouch { title_id: String, enabled: bool },
     GameFrontTouchAuxiliary { title_id: String, enabled: bool },
     StreamDebug(bool),
+    StreamLog(bool),
     Back,
 }
 
@@ -83,6 +85,7 @@ fn settings_rows(app: &App) -> Vec<SettingsRow> {
     rows.push(SettingsRow::StreamDebug(
         app.settings.show_stream_debug_info,
     ));
+    rows.push(SettingsRow::StreamLog(app.settings.logging_enabled));
     rows.push(SettingsRow::Back);
     rows
 }
@@ -281,6 +284,18 @@ pub(crate) fn show(ctx: &egui::Context, app: &App, commands: &mut Vec<AppCommand
                 }
                 row_index += 1;
 
+                if checkbox_row(
+                    ui,
+                    selected_index == row_index,
+                    app.settings.logging_enabled,
+                    i18n.text("settings-stream-log"),
+                ) {
+                    commands.push(
+                        Command::SetLoggingEnabled(!app.settings.logging_enabled).into(),
+                    );
+                }
+                row_index += 1;
+
                 ui.add_space(14.0);
                 ui.separator();
                 if focus_row(ui, selected_index == row_index, i18n.text("action-back")) {
@@ -450,6 +465,9 @@ impl App {
             SettingsRow::StreamDebug(enabled) => {
                 return self.handle_settings_command(Command::SetShowStreamDebugInfo(!enabled));
             }
+            SettingsRow::StreamLog(enabled) => {
+                return self.handle_settings_command(Command::SetLoggingEnabled(!enabled));
+            }
             SettingsRow::Back => {}
         }
 
@@ -559,6 +577,11 @@ impl App {
             }
             Command::SetShowStreamDebugInfo(enabled) => {
                 self.settings.show_stream_debug_info = enabled;
+                self.settings.save();
+            }
+            Command::SetLoggingEnabled(enabled) => {
+                self.settings.logging_enabled = enabled;
+                crate::logging::set_enabled(enabled);
                 self.settings.save();
             }
         }

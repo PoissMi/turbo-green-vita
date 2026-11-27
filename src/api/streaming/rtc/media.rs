@@ -1,3 +1,4 @@
+use crate::logging::log_line;
 use crate::api::streaming::rtc::rtp;
 use crate::streaming::video::{DecodedFrame, DecoderConfig, DirectVideoOutput, VideoDecodeWorker};
 use anyhow::Result;
@@ -131,7 +132,7 @@ impl VideoReceiver {
                     }
                 }
                 Err(error) => {
-                    eprintln!("Failed to decode H264 video frame: {error}");
+                    log_line!("Failed to decode H264 video frame: {error}");
                     decode_errors = decode_errors.saturating_add(1);
                     *keyframe_requested = true;
                 }

@@ -22,6 +22,7 @@ settings-front-touch-auxiliary-buttons = Использовать передни
 settings-rear-touch-enabled = Включить управление с задней сенсорной панели
 settings-cloud-host = Облачный хост: { $host }
 settings-home-host = Домашний хост: { $host }
+settings-stream-log = Включить запись диагностики стриминга
 settings-stream-debug-info = Показывать отладочную информацию трансляции
 action-back = Назад
 

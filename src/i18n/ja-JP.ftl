@@ -22,6 +22,7 @@ settings-front-touch-auxiliary-buttons = 前面タッチをマウスではなく
 settings-rear-touch-enabled = 背面タッチ操作を有効にする
 settings-cloud-host = クラウドホスト: { $host }
 settings-home-host = ホームホスト: { $host }
+settings-stream-log = ストリーミング診断ログを有効にする
 settings-stream-debug-info = ストリーミングのデバッグ情報を表示
 action-back = 戻る
 

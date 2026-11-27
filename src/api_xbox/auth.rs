@@ -1,3 +1,4 @@
+use crate::logging::log_line;
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
@@ -193,13 +194,13 @@ impl MsalAuth {
                 // Never leave the old plaintext token behind, even if Safe Memory is unavailable.
                 let _ = std::fs::remove_file(TOKEN_STORE_PATH);
                 if let Err(error) = persist_refresh_token(&token) {
-                    eprintln!("Could not migrate saved xCloud login encryption: {error:#}");
+                    log_line!("Could not migrate saved xCloud login encryption: {error:#}");
                 }
                 Some(token)
             }
             Ok(None) => None,
             Err(error) => {
-                eprintln!("Could not load encrypted xCloud login; clearing it: {error:#}");
+                log_line!("Could not load encrypted xCloud login; clearing it: {error:#}");
                 let _ = std::fs::remove_file(TOKEN_STORE_PATH);
                 None
             }
@@ -227,7 +228,7 @@ impl MsalAuth {
 
         let result = persist_refresh_token(&refresh_token);
         if let Err(error) = result {
-            eprintln!("Could not persist xCloud login: {error:#}");
+            log_line!("Could not persist xCloud login: {error:#}");
         }
     }
 
@@ -235,7 +236,7 @@ impl MsalAuth {
         self.refresh_token = None;
         let _ = std::fs::remove_file(TOKEN_STORE_PATH);
         if let Err(error) = clear_token_key() {
-            eprintln!("Could not clear xCloud login key from Safe Memory: {error:#}");
+            log_line!("Could not clear xCloud login key from Safe Memory: {error:#}");
         }
     }
 

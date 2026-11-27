@@ -22,6 +22,7 @@ settings-front-touch-auxiliary-buttons = استخدام اللمس الأمام�
 settings-rear-touch-enabled = تمكين عناصر التحكم باللمس الخلفي
 settings-cloud-host = مضيف السحابة: { $host }
 settings-home-host = المضيف المنزلي: { $host }
+settings-stream-log = تمكين تسجيل تشخيص البث
 settings-stream-debug-info = إظهار معلومات تصحيح أخطاء البث
 action-back = رجوع
 

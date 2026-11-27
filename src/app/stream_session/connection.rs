@@ -1,3 +1,4 @@
+use crate::logging::log_line;
 use super::StreamingSession;
 use crate::app::{App, AppState, PollJob, poll_job};
 use crate::i18n::{I18n, arg_string};
@@ -63,27 +64,27 @@ pub(crate) struct StreamStartTarget {
 }
 
 pub(in crate::app) async fn cleanup_active_sessions(api: &ApiClient, kind: StreamKind) {
-    eprintln!("Checking for active {kind:?} sessions...");
+    log_line!("Checking for active {kind:?} sessions...");
     let paths = match api.get_active_session_paths(kind).await {
         Ok(paths) => paths,
         Err(error) => {
             if error.to_string().contains("404") {
-                eprintln!("No active-sessions endpoint for {kind:?} (404) - skipping");
+                log_line!("No active-sessions endpoint for {kind:?} (404) - skipping");
             } else {
-                eprintln!("Failed to check for active {kind:?} sessions: {error:#}");
+                log_line!("Failed to check for active {kind:?} sessions: {error:#}");
             }
             return;
         }
     };
 
     if paths.is_empty() {
-        eprintln!("No stale {kind:?} sessions found");
+        log_line!("No stale {kind:?} sessions found");
         return;
     }
-    eprintln!("Found {} stale {kind:?} session(s), stopping", paths.len());
+    log_line!("Found {} stale {kind:?} session(s), stopping", paths.len());
     for path in paths {
         if let Err(error) = api.stop_session(kind, &path).await {
-            eprintln!("Failed to stop stale session {path}: {error:#}");
+            log_line!("Failed to stop stale session {path}: {error:#}");
         }
     }
 }
@@ -144,7 +145,7 @@ impl App {
                         wait_estimate_job: None,
                     },
                     PollJob::Done(Err(error)) => {
-                        eprintln!(
+                        log_line!(
                             "Failed to start {:?} stream for {}: {error:#}",
                             target.kind, target.label
                         );
@@ -229,7 +230,7 @@ impl App {
                     Ok(streaming) => Ok(AppState::Streaming(streaming)),
                     Err(error) => {
                         let _ = session.stream.stop().await;
-                        eprintln!("Failed to start WebRTC session: {error:#}");
+                        log_line!("Failed to start WebRTC session: {error:#}");
                         Ok(self.localized_error_state(
                             "error-webrtc-negotiation",
                             format!("{error:#}"),
@@ -250,7 +251,7 @@ impl App {
             Err(error) => {
                 let message = error.to_string();
                 session.consecutive_failures += 1;
-                eprintln!(
+                log_line!(
                     "Stream state check failed (attempt {}): {message:#}",
                     session.consecutive_failures
                 );
@@ -287,7 +288,7 @@ impl App {
                         ));
                     }
                     Err(error) => {
-                        eprintln!("Failed to fetch xCloud wait estimate: {error:#}");
+                        log_line!("Failed to fetch xCloud wait estimate: {error:#}");
                     }
                 },
             }

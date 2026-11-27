@@ -22,6 +22,7 @@ settings-front-touch-auxiliary-buttons = 將前觸控螢幕用於 L2/R2/L3/R3，
 settings-rear-touch-enabled = 啟用背面觸控操作
 settings-cloud-host = 雲端主機: { $host }
 settings-home-host = 本地主機: { $host }
+settings-stream-log = 啟用串流診斷日誌記錄
 settings-stream-debug-info = 顯示串流偵錯資訊
 action-back = 返回
 

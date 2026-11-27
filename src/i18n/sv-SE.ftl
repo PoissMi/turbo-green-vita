@@ -22,6 +22,7 @@ settings-front-touch-auxiliary-buttons = Använd främre pekskärmen för L2/R2/
 settings-rear-touch-enabled = Aktivera bakre pekskärmskontroller
 settings-cloud-host = Molnvärd: { $host }
 settings-home-host = Hemvärd: { $host }
+settings-stream-log = Aktivera loggning av strömningsdiagnostik
 settings-stream-debug-info = Visa felsökningsinfo för strömning
 action-back = Tillbaka
 

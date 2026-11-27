@@ -1,3 +1,4 @@
+use crate::logging::log_line;
 use crate::streaming::video::VideoDecodeWorker;
 use bytes::Bytes;
 use h264_reader::annexb::AnnexBReader;
@@ -654,7 +655,7 @@ impl VideoRtp {
             .resolution
             .is_some_and(|(width, height)| width > self.max_width || height > self.max_height);
         if sample_too_large {
-            eprintln!(
+            log_line!(
                 "Dropping H264 access unit larger than decoder: {:?} > {}x{}",
                 unit.resolution, self.max_width, self.max_height
             );
@@ -697,7 +698,7 @@ impl VideoRtp {
             self.source_frame_duration_us,
             completed.first_packet_at,
         ) {
-            eprintln!("Video decoder queue is full; continuing while requesting a keyframe");
+            log_line!("Video decoder queue is full; continuing while requesting a keyframe");
             *keyframe_requested = true;
             stats.dropped = stats.dropped.saturating_add(1);
         }

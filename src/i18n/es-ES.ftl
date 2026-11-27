@@ -22,6 +22,7 @@ settings-front-touch-auxiliary-buttons = Usar la pantalla táctil frontal para L
 settings-rear-touch-enabled = Activar controles del panel táctil trasero
 settings-cloud-host = Host de la nube: { $host }
 settings-home-host = Host local: { $host }
+settings-stream-log = Activar el registro de diagnósticos del streaming
 settings-stream-debug-info = Mostrar información de depuración del streaming
 action-back = Atrás
 

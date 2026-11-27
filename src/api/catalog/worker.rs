@@ -1,5 +1,6 @@
 //! Provider-neutral metadata/image worker and on-disk game catalog cache.
 
+use crate::logging::log_line;
 use super::{GameCatalogBackend, GameDetails, cache};
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, select_biased};
@@ -55,7 +56,7 @@ impl CatalogJob {
                     .fetch_details(client, &metadata_id, &market, &language)
                     .await;
                 if let Err(error) = &result {
-                    eprintln!("Catalog worker: metadata for {game_id} failed: {error:#}");
+                    log_line!("Catalog worker: metadata for {game_id} failed: {error:#}");
                 } else if let Ok(details) = &result
                     && let Err(error) = save_cached_metadata(
                         backend.cache_namespace(),
@@ -64,7 +65,7 @@ impl CatalogJob {
                         details,
                     )
                 {
-                    eprintln!("Catalog worker: failed to cache metadata for {game_id}: {error:#}");
+                    log_line!("Catalog worker: failed to cache metadata for {game_id}: {error:#}");
                 }
                 CatalogResult::Metadata {
                     game_id,
@@ -87,7 +88,7 @@ impl CatalogJob {
                 )
                 .await;
                 if let Err(error) = &result {
-                    eprintln!("Catalog worker: {kind:?} image for {game_id} failed: {error:#}");
+                    log_line!("Catalog worker: {kind:?} image for {game_id} failed: {error:#}");
                 }
                 CatalogResult::Image {
                     game_id,
@@ -128,7 +129,7 @@ impl CatalogWorker {
                 .enable_all()
                 .build()
             else {
-                eprintln!("Catalog worker: failed to build tokio runtime, thread exiting");
+                log_line!("Catalog worker: failed to build tokio runtime, thread exiting");
                 return;
             };
             let client = Client::builder()
@@ -150,7 +151,7 @@ impl CatalogWorker {
                 let result = match outcome {
                     Ok(result) => result,
                     Err(_) => {
-                        eprintln!("Catalog worker: job panicked; continuing");
+                        log_line!("Catalog worker: job panicked; continuing");
                         continue;
                     }
                 };
@@ -285,7 +286,7 @@ async fn load_or_fetch_image(
         match decode_image_rgba(&bytes, max_width, max_height, pad_to_bounds) {
             Ok(art) => return Ok(art),
             Err(error) => {
-                eprintln!("Catalog worker: invalid cached {kind:?} for {game_id}: {error:#}");
+                log_line!("Catalog worker: invalid cached {kind:?} for {game_id}: {error:#}");
                 let _ = std::fs::remove_file(path);
             }
         }
@@ -306,7 +307,7 @@ async fn load_or_fetch_image(
     if let Some(path) = cache_path.as_deref()
         && let Err(error) = cache::write(path, &bytes)
     {
-        eprintln!("Catalog worker: failed to cache {kind:?} for {game_id}: {error:#}");
+        log_line!("Catalog worker: failed to cache {kind:?} for {game_id}: {error:#}");
     }
     Ok(art)
 }
@@ -359,7 +360,7 @@ fn load_cached_metadata(namespace: &str, locale: &str, game_id: &str) -> Option<
     match serde_json::from_slice(&bytes) {
         Ok(details) => Some(details),
         Err(error) => {
-            eprintln!("Catalog worker: invalid cached metadata for {game_id}: {error}");
+            log_line!("Catalog worker: invalid cached metadata for {game_id}: {error}");
             let _ = std::fs::remove_file(path);
             None
         }
