@@ -101,14 +101,14 @@ impl Locale {
 pub enum MaxBitrate {
     #[default]
     Mbps2 = 2,
+    Mbps2500 = 2500,
     Mbps3 = 3,
+    Mbps3500 = 3500,
     Mbps4 = 4,
+    Mbps4500 = 4500,
     Mbps5 = 5,
     Mbps6 = 6,
     Mbps8 = 8,
-    Mbps2500 = 2500,
-    Mbps3500 = 3500,
-    Mbps4500 = 4500,
     // Legacy settings saved with removed options (15–50 Mbps) deserialize to this variant.
     #[serde(other)]
     Mbps10 = 10,
@@ -117,14 +117,14 @@ pub enum MaxBitrate {
 impl MaxBitrate {
     pub const ALL: [MaxBitrate; 10] = [
         Self::Mbps2,
+        Self::Mbps2500,
         Self::Mbps3,
+        Self::Mbps3500,
         Self::Mbps4,
+        Self::Mbps4500,
         Self::Mbps5,
         Self::Mbps6,
         Self::Mbps8,
-        Self::Mbps2500,
-        Self::Mbps3500,
-        Self::Mbps4500,
         Self::Mbps10,
     ];
 
@@ -137,9 +137,9 @@ impl MaxBitrate {
             Self::Mbps5 => "5 Mbps",
             Self::Mbps6 => "6 Mbps",
             Self::Mbps8 => "8 Mbps",
-            Self::Mbps2500 => "2500 Mbps",
-            Self::Mbps3500 => "3500 Mbps",
-            Self::Mbps4500 => "4500 Mbps",
+            Self::Mbps2500 => "2.5 Mbps",
+            Self::Mbps3500 => "3.5 Mbps",
+            Self::Mbps4500 => "4.5 Mbps",
             Self::Mbps10 => "10 Mbps",
         }
     }
