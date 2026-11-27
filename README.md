@@ -242,11 +242,29 @@ timeline is running behind by (`srv`, `drift`).
 
 ### Max bitrate setting
 
-A new **Max bitrate** row in Settings advertises a bitrate cap (2, 3, 4, 5, 6,
-8, or 10 Mbps) to xCloud in the client-capabilities message and SDP, letting
-you trade image quality for stability on weak or congested Wi-Fi. The default
-is 2 Mbps, matching upstream behavior. Settings saved with older values
-(15–50 Mbps) load as 10 Mbps.
+A new **Max bitrate** row in Settings advertises a bitrate cap (2, 2.5, 3, 3.5,
+4, 4.5, 5, 6, 8, or 10 Mbps — the half-step caps were added in 0.4.3) to
+xCloud in the client-capabilities message and SDP, letting you trade image
+quality for stability on weak or congested Wi-Fi. The default is 2 Mbps,
+matching upstream behavior. Settings saved with older values (15–50 Mbps)
+load as 10 Mbps. The advertised value is read when a stream starts; changing
+it does not affect a running stream.
+
+### Settings, logging, and the streaming HUD (0.4.3)
+
+- **Diagnostic logging toggle (0.4.3).** A new **Enable diagnostic logging**
+  row in Settings (on by default) gates every diagnostic log line in the
+  app. Turning it off silences all of them immediately, without a restart.
+  The gate starts off while the app boots, so a fresh launch is silent until
+  settings are loaded.
+- **The HUD is independent of logging (0.4.3).** The green on-screen
+  streaming debug line ("Show streaming debug info") reads its numbers from
+  in-memory session state, not from the log, so it keeps working with
+  logging on or off. The two options can be used in any combination.
+- **Touch device resolution (0.4.3).** The front and rear touch pads are now
+  identified from SDL's device names at startup instead of hardcoded IDs.
+  This restores touchscreen selection across SDL/VitaSDK builds that
+  register the two pads in a different order than the original port.
 
 ### UI
 
