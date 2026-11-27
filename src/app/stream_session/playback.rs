@@ -42,10 +42,10 @@ impl App {
         let return_target = if let Some(streaming) = state.into_streaming() {
             let return_target = streaming.return_target;
             let description = streaming.backend_description();
-            eprintln!("Exiting stream: stopping {description}...");
+            crate::elog!("Exiting stream: stopping {description}...");
             match streaming.stop().await {
                 Ok(()) => {}
-                Err(error) => eprintln!("Failed to stop {description}: {error:#}"),
+                Err(error) => crate::elog!("Failed to stop {description}: {error:#}"),
             }
             return_target
         } else {

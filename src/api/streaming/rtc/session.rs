@@ -178,7 +178,7 @@ impl<B: RtcSessionBackend> RtcSession<B> {
             let _ = self.peer.handle_timeout(now);
         }
         if self.initial_video_keyframe_due(now) {
-            eprintln!("No initial video RTP after WebRTC connected; requesting a keyframe");
+            crate::elog!("No initial video RTP after WebRTC connected; requesting a keyframe");
             keyframe_requested = true;
         }
         self.request_keyframe(keyframe_requested, now);
@@ -201,7 +201,7 @@ impl<B: RtcSessionBackend> RtcSession<B> {
                 "cap:{}kbps fps:{} {server} {status}",
                 self.max_video_bitrate_kbps, REQUESTED_VIDEO_FPS
             );
-            eprintln!("{}", self.status);
+            crate::elog!("{}", self.status);
         }
 
         Ok(gathered_candidates)
@@ -315,7 +315,7 @@ impl<B: RtcSessionBackend> RtcSession<B> {
                     }
                 }
                 RTCPeerConnectionEvent::OnIceCandidateErrorEvent(error) => {
-                    eprintln!(
+                    crate::elog!(
                         "ICE candidate error from {} ({}:{}): {} {}",
                         error.url, error.address, error.port, error.error_code, error.error_text
                     );

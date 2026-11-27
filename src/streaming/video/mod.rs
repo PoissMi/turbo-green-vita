@@ -63,12 +63,12 @@ pub(crate) fn reserve_yuv_output() -> Result<()> {
                 if index < STAGING_SLOT_MIN {
                     return Err(error);
                 }
-                eprintln!("Only {index} staging slots could be allocated; continuing with {index}");
+                crate::elog!("Only {index} staging slots could be allocated; continuing with {index}");
                 break;
             }
         }
     }
-    eprintln!("Allocated {} NV12 staging slots", slots.len());
+    crate::elog!("Allocated {} NV12 staging slots", slots.len());
     *IDLE_OUTPUT_SLOTS.lock().unwrap() = Some(slots);
     Ok(())
 }

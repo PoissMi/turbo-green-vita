@@ -23,6 +23,7 @@ settings-rear-touch-enabled = Włącz sterowanie tylnym panelem dotykowym
 settings-cloud-host = Host chmury: { $host }
 settings-home-host = Host domowy: { $host }
 settings-stream-debug-info = Pokaż informacje debugowania strumieniowania
+settings-enable-logging = Włącz logowanie diagnostyczne
 action-back = Wstecz
 
 mode-select-cloud-subtitle = Gry przez Xbox Cloud Gaming

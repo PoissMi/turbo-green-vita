@@ -5,7 +5,9 @@ use sdl2::event::Event;
 use sdl2::joystick::Joystick;
 use sdl2::keyboard::Keycode;
 use sdl2::mouse::MouseButton;
+use sdl2::touch;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 pub fn map_keyboard_event(event: &Event) -> Option<AppCommand> {
     let Event::KeyDown {
@@ -225,10 +227,54 @@ fn axis_to_f32(raw: i16) -> f32 {
     raw as f32 / i16::MAX as f32
 }
 
-/// The front touchscreen's own SDL touch device id (registered second on the Vita's touch
-/// backend, `SDL_vitatouch.c`: `SDL_AddTouch(1, ..., "Front")`, `SDL_AddTouch(2, ..., "Back")`).
-const FRONT_TOUCH_DEVICE_ID: i64 = 1;
-const REAR_TOUCH_DEVICE_ID: i64 = 2;
+/// The front and rear touch pads, resolved from SDL at startup. The numeric
+/// IDs are intentionally not assumed: an SDL/VitaSDK build can register the
+/// devices in either order, and `SDL_GetTouchName` lets us identify them by
+/// the driver's reported names ("Front" / "Back"). If the names are
+/// unavailable we retain the IDs historically used by `SDL_vitatouch.c`.
+const DEFAULT_FRONT_TOUCH_DEVICE_ID: i64 = 1;
+const DEFAULT_REAR_TOUCH_DEVICE_ID: i64 = 2;
+
+#[derive(Clone, Copy)]
+struct TouchDeviceIds {
+    front: i64,
+    rear: i64,
+}
+
+fn touch_device_ids() -> TouchDeviceIds {
+    static IDS: OnceLock<TouchDeviceIds> = OnceLock::new();
+    *IDS.get_or_init(|| {
+        let mut front = DEFAULT_FRONT_TOUCH_DEVICE_ID;
+        let mut rear = DEFAULT_REAR_TOUCH_DEVICE_ID;
+        for index in 0..touch::num_touch_devices() {
+            let id = touch::touch_device(index);
+            let name = unsafe {
+                let name = sdl2::sys::SDL_GetTouchName(index);
+                if name.is_null() {
+                    String::new()
+                } else {
+                    std::ffi::CStr::from_ptr(name)
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            };
+            if name.eq_ignore_ascii_case("Front") {
+                front = id;
+            } else if name.eq_ignore_ascii_case("Back") {
+                rear = id;
+            }
+        }
+        TouchDeviceIds { front, rear }
+    })
+}
+
+fn front_touch_id() -> i64 {
+    touch_device_ids().front
+}
+
+fn rear_touch_id() -> i64 {
+    touch_device_ids().rear
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RearTouchButton {
@@ -261,7 +307,7 @@ impl RearTouchButtons {
                 x,
                 y,
                 ..
-            } if touch_id == REAR_TOUCH_DEVICE_ID || touch_id == FRONT_TOUCH_DEVICE_ID => {
+            } if touch_id == rear_touch_id() || touch_id == front_touch_id() => {
                 let button = match (x < 0.5, y < 0.5) {
                     (true, true) => RearTouchButton::L2,
                     (false, true) => RearTouchButton::R2,
@@ -274,7 +320,7 @@ impl RearTouchButtons {
                 touch_id,
                 finger_id,
                 ..
-            } if touch_id == REAR_TOUCH_DEVICE_ID || touch_id == FRONT_TOUCH_DEVICE_ID => {
+            } if touch_id == rear_touch_id() || touch_id == front_touch_id() => {
                 self.fingers_mut(touch_id).remove(&finger_id);
             }
             _ => {}
@@ -282,7 +328,7 @@ impl RearTouchButtons {
     }
 
     fn fingers_mut(&mut self, touch_id: i64) -> &mut HashMap<i64, RearTouchButton> {
-        if touch_id == FRONT_TOUCH_DEVICE_ID {
+        if touch_id == front_touch_id() {
             &mut self.front_fingers
         } else {
             &mut self.rear_fingers
@@ -334,7 +380,7 @@ pub fn map_pointer_event(
             delta: egui::vec2(x as f32, y as f32),
             modifiers: egui::Modifiers::default(),
         }),
-        Event::FingerDown { touch_id, x, y, .. } if touch_id == FRONT_TOUCH_DEVICE_ID => {
+        Event::FingerDown { touch_id, x, y, .. } if touch_id == front_touch_id() => {
             Some(pointer_button_at(
                 pointer_pos,
                 touch_to_screen_pos(x, y, screen_size),
@@ -342,11 +388,11 @@ pub fn map_pointer_event(
                 true,
             ))
         }
-        Event::FingerMotion { touch_id, x, y, .. } if touch_id == FRONT_TOUCH_DEVICE_ID => {
+        Event::FingerMotion { touch_id, x, y, .. } if touch_id == front_touch_id() => {
             *pointer_pos = touch_to_screen_pos(x, y, screen_size);
             Some(egui::Event::PointerMoved(*pointer_pos))
         }
-        Event::FingerUp { touch_id, x, y, .. } if touch_id == FRONT_TOUCH_DEVICE_ID => {
+        Event::FingerUp { touch_id, x, y, .. } if touch_id == front_touch_id() => {
             Some(pointer_button_at(
                 pointer_pos,
                 touch_to_screen_pos(x, y, screen_size),
@@ -401,13 +447,13 @@ pub fn map_stream_pointer_event(
         Event::MouseButtonDown { x, y, .. } => (1u8, (x as f32, y as f32)),
         Event::MouseButtonUp { x, y, .. } => (2u8, (x as f32, y as f32)),
         Event::MouseMotion { x, y, .. } => (3u8, (x as f32, y as f32)),
-        Event::FingerDown { touch_id, x, y, .. } if touch_id == FRONT_TOUCH_DEVICE_ID => {
+        Event::FingerDown { touch_id, x, y, .. } if touch_id == front_touch_id() => {
             (1u8, (x * window_size.0, y * window_size.1))
         }
-        Event::FingerUp { touch_id, x, y, .. } if touch_id == FRONT_TOUCH_DEVICE_ID => {
+        Event::FingerUp { touch_id, x, y, .. } if touch_id == front_touch_id() => {
             (2u8, (x * window_size.0, y * window_size.1))
         }
-        Event::FingerMotion { touch_id, x, y, .. } if touch_id == FRONT_TOUCH_DEVICE_ID => {
+        Event::FingerMotion { touch_id, x, y, .. } if touch_id == front_touch_id() => {
             (3u8, (x * window_size.0, y * window_size.1))
         }
         _ => return None,

@@ -37,7 +37,7 @@ impl DecoderFrameBuffer {
         match DecoderBlock::allocate(size, true) {
             Ok(block) => Ok(Self(Some(block))),
             Err(error) => {
-                eprintln!("PHYCONT-NC unavailable; trying CDRAM: {error:#}");
+                crate::elog!("PHYCONT-NC unavailable; trying CDRAM: {error:#}");
                 DecoderBlock::allocate(size, false).map(|block| Self(Some(block)))
             }
         }
@@ -101,7 +101,7 @@ impl DecoderBlock {
             bail!("sceKernelGetMemBlockBase for {pool} decoder buffer failed: {ret:#x}");
         }
         block.address = base as usize;
-        eprintln!("Allocated {capacity} byte decoder frame buffer in {pool}");
+        crate::elog!("Allocated {capacity} byte decoder frame buffer in {pool}");
         Ok(block)
     }
 }

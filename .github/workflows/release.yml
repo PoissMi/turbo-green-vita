@@ -66,13 +66,13 @@ jobs:
             }
 
       - name: Build VPK
-        if: steps.release.outputs.exists == 'false'
+        if: github.event_name == 'workflow_dispatch' || steps.release.outputs.exists == 'false'
         env:
           RUSTFLAGS: "-C target-feature=-neon"
         run: cargo vita build vpk --release
 
       - name: Upload test VPK
-        if: github.event_name == 'workflow_dispatch' && steps.release.outputs.exists == 'true'
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: turbo-green-vita-test-${{ github.run_number }}
@@ -89,7 +89,7 @@ jobs:
           if-no-files-found: error
 
       - name: Create GitHub release
-        if: steps.release.outputs.exists == 'false'
+        if: github.event_name != 'workflow_dispatch' && steps.release.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         env:
           RELEASE_TAG: ${{ steps.version.outputs.version }}

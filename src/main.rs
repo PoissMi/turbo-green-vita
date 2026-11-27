@@ -6,6 +6,7 @@ mod app;
 mod i18n;
 mod input;
 mod jobs;
+mod logging;
 mod safe_memory;
 mod settings;
 mod shell;
